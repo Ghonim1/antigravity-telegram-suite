@@ -14,7 +14,7 @@
 const http = require('http');
 
 // ─── State ────────────────────────────────────────────────────────────
-let isEnabled = true;
+let isEnabled = false;
 let heartbeatTimer = null;
 let injectedTargets = new Set();
 let totalClicks = 0;
@@ -126,6 +126,7 @@ async function checkObserverStatus(port) {
 
 // ─── Inject Observer ──────────────────────────────────────────────────
 async function injectObserver(port) {
+    if (DriverFactory.getDriver().appType === 'agent') return 0;
     const targets = await resolveTargets(port, true);
     const script = buildObserverScript();
     let injectedCount = 0;
@@ -149,6 +150,7 @@ async function injectObserver(port) {
 // ─── Heartbeat ────────────────────────────────────────────────────────
 async function heartbeat(port) {
     if (!isEnabled) return;
+    if (DriverFactory.getDriver().appType === 'agent') return;
 
     try {
         const targets = await resolveTargets(port, true);
@@ -243,6 +245,14 @@ async function heartbeat(port) {
  * @returns {Promise<{success: boolean, injected: number}>}
  */
 async function enable(port) {
+    if (DriverFactory.getDriver().appType === 'agent') {
+        isEnabled = false;
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+        return { success: false, injected: 0, standaloneUnsupported: true };
+    }
     const wasEnabled = isEnabled;
     isEnabled = true;
 

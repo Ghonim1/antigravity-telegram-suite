@@ -11,10 +11,9 @@ const { config, isIDERunning, killIDE, cleanLockFile, launchIDE, getLastWorkspac
 
 // Initialize sleep prevention on macOS if enabled in .env
 initCaffeinate();
-const { isAgentWorking, getFullLatestResponse, snapshotChatState, captureAgentScreenshot, captureFullIDEScreenshot, waitForAgentResponse, sendViaCDP, clickArtifactButton, triggerNewChat, triggerModelMenu, getAvailableModels, selectModel, getCurrentModel, stopAgent, getQuota, listWindows, setPreferredWindow, getPreferredWindow, getPreferredTargetId, getCachedWindows, closeWindow, closeAllEditors, listAgentThreads, switchAgentThread, getActiveThreadId, getActiveThreadInfo, setActiveWorkspace, switchStandaloneWorkspace, listStandaloneWorkspaces, getLastResolvedThreadId, setLastResolvedThreadId, setOnThreadResolved } = require('./cdp_controller');
+const { isAgentWorking, getFullLatestResponse, snapshotChatState, captureAgentScreenshot, captureFullIDEScreenshot, waitForAgentResponse, sendViaCDP, clickArtifactButton, triggerNewChat, triggerModelMenu, getAvailableModels, selectModel, getCurrentModel, getCurrentPermissionMode, selectPermissionMode, stopAgent, getQuota, listWindows, setPreferredWindow, getPreferredWindow, getPreferredTargetId, getCachedWindows, closeWindow, closeAllEditors, listAgentThreads, switchAgentThread, getActiveThreadId, getActiveThreadInfo, setActiveWorkspace, switchStandaloneWorkspace, listStandaloneWorkspaces, getLastResolvedThreadId, setLastResolvedThreadId, setOnThreadResolved } = require('./cdp_controller');
 const autoaccept = require('./autoaccept');
 const updater = require('./updater');
-const { runTurboOrchestration } = require('./turbo_orchestrator');
 const TaskWatcher = require('./task_watcher');
 const { extractLocalImageMarkdown } = require('./local_media');
 const { ensureCdpReady, isConnectionRefusedError } = require('./cdp_health');
@@ -30,20 +29,10 @@ try {
     console.log('[CronCrew] schedule_client.js not found — schedule features disabled.');
 }
 
-const TURBO_STATE_FILE = path.join(os.homedir(), '.gemini', 'antigravity', 'turbo_state.json');
 const RESTART_FLAG_FILE = path.join(os.homedir(), '.gemini', 'antigravity', '.restart_pending');
 
 function escHtml(s) {
     return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function loadTurboState() {
-    try {
-        if (fs.existsSync(TURBO_STATE_FILE)) {
-            return JSON.parse(fs.readFileSync(TURBO_STATE_FILE, 'utf-8'));
-        }
-    } catch (e) {}
-    return { active: false, pinnedMsgId: null };
 }
 
 // Skills cache for interactive menu
@@ -78,16 +67,6 @@ function extractSkillDescription(content) {
     }
     return val.replace(/[*_`#]/g, '').trim();
 }
-
-function saveTurboState() {
-    try {
-        fs.writeFileSync(TURBO_STATE_FILE, JSON.stringify({ active: isTurboMode, pinnedMsgId: turboPinnedMsgId }));
-    } catch (e) {}
-}
-
-const initialTurboState = loadTurboState();
-let isTurboMode = initialTurboState.active;
-let turboPinnedMsgId = initialTurboState.pinnedMsgId;
 
 let cachedAgentThreads = [];
 let cachedWorkspacesList = [];
@@ -311,55 +290,6 @@ bot.use(async (ctx, next) => {
     return next();
 });
 
-let isTurboRunning = false;
-
-// Safe commands/buttons that can pass through during turbo execution
-const TURBO_SAFE_COMMANDS = [
-    '/turbo', '/stop', '/screenshot', '/latest', '/status',
-    '/quota', '/help', '/version', '/panel', '/menu',
-    '/file', '/cmd', '/autoaccept', '/lang', '/window',
-    '/artifacts', '/restart',
-    '/login', '/accounts', '/switchacc', '/getinfo', '/logincode', '/delacc'
-];
-const TURBO_SAFE_BUTTONS = [
-    '📸', '💬', '📦', '📊', '🚀'
-];
-
-// Middleware to prevent project switching or concurrent tasks while Turbo Mode is executing
-bot.use(async (ctx, next) => {
-    if (isTurboRunning) {
-        const text = ctx.message?.text || '';
-        const cbData = ctx.callbackQuery?.data || '';
-        
-        if (text) {
-            // Check exact match for /start to prevent bypassing with /start_ide and /start_ag
-            if (text.trim() === '/start') {
-                return next();
-            }
-            const isSafeCmd = TURBO_SAFE_COMMANDS.some(cmd => text.startsWith(cmd));
-            const isSafeBtn = TURBO_SAFE_BUTTONS.some(btn => text.startsWith(btn));
-            if (isSafeCmd || isSafeBtn) {
-                return next();
-            }
-            return ctx.reply('⏳ Turbo Mode is currently running! Are you sure you want to stop it?', Markup.inlineKeyboard([
-                [Markup.button.callback('🛑 Force Stop Turbo', 'turbo_force_stop')],
-                [Markup.button.callback('❌ Cancel', 'turbo_cancel')]
-            ]));
-        } else if (cbData) {
-            if (cbData.startsWith('file_') || cbData.startsWith('artifact_') || cbData.startsWith('turbo_')) {
-                return next();
-            }
-            return ctx.answerCbQuery(t('turbo.is_running_short') || '⏳ Please wait', { show_alert: true }).catch(()=>{});
-        } else if (ctx.message?.photo || ctx.message?.document) {
-            // Block file/photo uploads during turbo as they trigger sendViaCDP paste
-            return ctx.reply('⏳ Turbo Mode is currently running! Are you sure you want to stop it?', Markup.inlineKeyboard([
-                [Markup.button.callback('🛑 Force Stop Turbo', 'turbo_force_stop')],
-                [Markup.button.callback('❌ Cancel', 'turbo_cancel')]
-            ]));
-        }
-    }
-    return next();
-});
 function getCDPPort(app = process.env.ANTIGRAVITY_PREFERRED_APP || 'agent') {
     if (app === 'ide') {
         return parseInt(process.env.IDE_CDP_PORT || '9334', 10);
@@ -958,7 +888,7 @@ bot.command('start_ide', async (ctx) => {
         ctx.reply(t('ide.started'));
         setTimeout(() => {
             if (autoaccept.isEnabled) autoaccept.enable(appPort).catch(()=>{});
-            const defaultModel = process.env.DEFAULT_MODEL || 'Gemini 3.1 Pro (High)';
+            const defaultModel = process.env.DEFAULT_MODEL || 'Gemini 4 Argon (High)';
             selectModel(appPort, defaultModel).catch(()=>{});
         }, 3000);
     } catch (err) {
@@ -987,7 +917,7 @@ bot.command('start_ag', async (ctx) => {
         ctx.reply(t('standalone.started'));
         setTimeout(() => {
             if (autoaccept.isEnabled) autoaccept.enable(appPort).catch(()=>{});
-            const defaultModel = process.env.DEFAULT_MODEL || 'Gemini 3.1 Pro (High)';
+            const defaultModel = process.env.DEFAULT_MODEL || 'Gemini 4 Argon (High)';
             selectModel(appPort, defaultModel).catch(()=>{});
         }, 3000);
     } catch (err) {
@@ -1098,7 +1028,12 @@ const handleStatus = async (ctx) => {
         // silently fail if we can't get chat info
     }
 
-    msg += '\n🛡️ <b>Auto-Accept:</b> ' + (autoaccept.isEnabled ? t('status.autoaccept_on') : t('status.autoaccept_off')) + '\n';
+    if (activeApp === 'agent') {
+        const permMode = await getCurrentPermissionMode(CDP_PORT).catch(() => null);
+        msg += '\n🛡️ <b>Mode:</b> ' + (permMode ? permMode.shortLabel : '🚀 Turbo') + '\n';
+    } else {
+        msg += '\n🛡️ <b>Auto-Accept:</b> ' + (autoaccept.isEnabled ? t('status.autoaccept_on') : t('status.autoaccept_off')) + '\n';
+    }
     if (PLATFORM === 'darwin') {
         const isCaff = isCaffeinateActive();
         const pid = getCaffeinatePid();
@@ -1182,12 +1117,24 @@ async function buildMainMenu(overrideThread = null, overrideWorkspace = null, ta
     // Başlığı max 20 karaktere kısalt
     if (displayTitle.length > 20) displayTitle = displayTitle.substring(0, 18) + '...';
 
+    let modeButtonText = '🚀 Turbo';
+    if (isIDE) {
+        modeButtonText = autoaccept.isEnabled ? '⚡ Auto: ON' : '🔴 Auto: OFF';
+    } else {
+        try {
+            const permMode = await getCurrentPermissionMode(CDP_PORT);
+            if (permMode && permMode.shortLabel) {
+                modeButtonText = permMode.shortLabel;
+            }
+        } catch (_) {}
+    }
+
     return Markup.keyboard([
         [`🤖 ${displayTitle}`, `🧠 ${modelName}`],
         [
             t('menu.btn_screenshot'), 
             t('menu.btn_artifacts'), 
-            isTurboMode ? t('turbo.btn_on') : t('turbo.btn_off'), 
+            modeButtonText, 
             t('menu.btn_latest')
         ]
     ]).resize();
@@ -1611,10 +1558,11 @@ bot.command('new', async (ctx) => {
         console.log('[/new] triggerNewChat result:', success);
         if (success) {
             ctx.reply(t('new_chat.opened'));
-            setTimeout(() => {
-                const defaultModel = process.env.DEFAULT_MODEL || 'Gemini 3.1 Pro (High)';
-                selectModel(CDP_PORT, defaultModel).catch(()=>{});
-            }, 1500);
+            if (process.env.DEFAULT_MODEL) {
+                setTimeout(() => {
+                    selectModel(CDP_PORT, process.env.DEFAULT_MODEL).catch(()=>{});
+                }, 1500);
+            }
         } else {
             ctx.reply(t('new_chat.not_found'));
         }
@@ -3292,6 +3240,11 @@ bot.action(/md_(.+)/, async (ctx) => {
 // ===== AUTO-ACCEPT =====
 
 const handleAutoAccept = async (ctx) => {
+    const preferredApp = process.env.ANTIGRAVITY_PREFERRED_APP || 'agent';
+    if (preferredApp === 'agent') {
+        return handlePermissionMode(ctx);
+    }
+
     const text = ctx.message.text || '';
     const parts = text.split(' ');
     parts.shift();
@@ -3553,12 +3506,11 @@ async function doLaunchWorkspace(ctx, workspace) {
                         if (autoaccept.isEnabled) {
                             autoaccept.enable(CDP_PORT).catch(() => {});
                         }
-                        await triggerNewChat(CDP_PORT);
                         const successMsg = t('workspace.started', { workspace }) || '📁 Workspace switched successfully!';
                         if (switchingMsg && switchingMsg.message_id) {
                             ctx.deleteMessage(switchingMsg.message_id).catch(()=>{});
                         }
-                        await sendMainMenu(ctx, successMsg);
+                        await sendMainMenu(ctx, successMsg, null, wsName);
                         return;
                     }
                 } catch (e) {
@@ -3575,12 +3527,11 @@ async function doLaunchWorkspace(ctx, workspace) {
                         if (autoaccept.isEnabled) {
                             autoaccept.enable(CDP_PORT).catch(() => {});
                         }
-                        await triggerNewChat(CDP_PORT);
                         const successMsg = t('workspace.started', { workspace }) || '📁 Workspace switched successfully!';
                         if (switchingMsg && switchingMsg.message_id) {
                             ctx.deleteMessage(switchingMsg.message_id).catch(()=>{});
                         }
-                        await sendMainMenu(ctx, successMsg);
+                        await sendMainMenu(ctx, successMsg, null, wsName);
                         return;
                     }
                 } catch (e) {
@@ -4363,6 +4314,7 @@ function getMenuCommands() {
         { command: 'cmd', description: t('menu.cmd_desc') },
         { command: 'file', description: t('menu.file_desc') },
         { command: 'stop', description: t('menu.stop_desc') },
+        { command: 'mode', description: 'Select permission mode (Turbo / Auto / Default / Review)' },
         { command: 'autoaccept', description: t('menu.autoaccept_desc') },
         { command: 'quota', description: t('menu.quota_desc') },
         { command: 'update', description: t('menu.update_desc') || 'Check for updates' },
@@ -4567,47 +4519,89 @@ bot.command('update', async (ctx) => {
     }
 });
 
-// ===== TURBO / COUNCIL MODE =====
+// ===== NATIVE PERMISSIONS MODE (TURBO / AUTO / DEFAULT / REVIEW) =====
 
-async function handleTurbo(ctx) {
-    isTurboMode = !isTurboMode; // Toggle
-    
-    if (!isTurboMode) {
-        if (turboPinnedMsgId) {
-            try {
-                await ctx.telegram.unpinChatMessage(ctx.chat.id, turboPinnedMsgId);
-            } catch (e) {}
-            turboPinnedMsgId = null;
-        }
-        saveTurboState();
-        await sendMainMenu(ctx, t('turbo.off'));
-    } else {
-        const msg = await ctx.reply(
-            t('turbo.on_msg'), 
-            { parse_mode: 'HTML' }
-        );
-        turboPinnedMsgId = msg.message_id;
+function buildPermissionModeKeyboard(currentId) {
+    const modes = [
+        { id: 'turbo', label: '🚀 Turbo', desc: 'Unrestricted execution' },
+        { id: 'auto', label: '⚡ Auto (Preview)', desc: 'Smart auto-decision' },
+        { id: 'default', label: '🛡️ Default', desc: 'Ask before sensitive ops' },
+        { id: 'request_review', label: '🔒 Request Review', desc: 'Every command requires approval' }
+    ];
+    return modes.map(m => [{
+        text: `${currentId === m.id ? '✅ ' : ''}${m.label} — ${m.desc}`,
+        callback_data: `perm_mode_${m.id}`
+    }]);
+}
+
+async function handlePermissionMode(ctx) {
+    const rawText = (ctx.message?.text || '').trim();
+    let arg = '';
+    if (rawText.startsWith('/')) {
+        const parts = rawText.split(/\s+/);
+        parts.shift();
+        arg = parts.join(' ').trim().toLowerCase();
+    }
+
+    if (arg && ['turbo', 'auto', 'default', 'review', 'request_review'].includes(arg)) {
         try {
-            await ctx.telegram.pinChatMessage(ctx.chat.id, turboPinnedMsgId);
-        } catch (e) {}
-        saveTurboState();
-        await sendMainMenu(ctx, t('turbo.on_toast') || '🚀 Turbo Mod devrede!');
+            const res = await selectPermissionMode(CDP_PORT, arg);
+            if (res.ok && res.mode) {
+                return await sendMainMenu(ctx, `✅ <b>Permission Mode:</b> ${res.mode.shortLabel}`);
+            }
+            return await ctx.reply('❌ Could not change permission mode via CDP.');
+        } catch (e) {
+            return await ctx.reply(`❌ Error: ${e.message}`);
+        }
+    }
+
+    try {
+        const current = await getCurrentPermissionMode(CDP_PORT);
+        const currentId = current?.id || 'turbo';
+        const currentLabel = current?.shortLabel || '🚀 Turbo';
+        const msg =
+            `🛡️ <b>Antigravity Native Permission Mode</b>\n` +
+            `Current: <b>${currentLabel}</b>\n\n` +
+            `• <b>🚀 Turbo:</b> Run all commands without restrictions\n` +
+            `• <b>⚡ Auto (Preview):</b> Automatically decide if commands run\n` +
+            `• <b>🛡️ Default:</b> Ask before sensitive operations\n` +
+            `• <b>🔒 Request Review:</b> Every command requires approval`;
+        await ctx.reply(msg, {
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: buildPermissionModeKeyboard(currentId) }
+        });
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.message}`);
     }
 }
 
-bot.command('turbo', handleTurbo);
-bot.hears(/^🚀/i, handleTurbo);
+bot.command('turbo', handlePermissionMode);
+bot.command('mode', handlePermissionMode);
+bot.command('permissions', handlePermissionMode);
+bot.hears(/^(🚀|🛡️|🔒)/i, handlePermissionMode);
 
-bot.action('turbo_force_stop', async (ctx) => {
-    isTurboRunning = false;
-    isTurboMode = false;
-    saveTurboState();
-    try { stopAgent(CDP_PORT); } catch(e) {}
-    await ctx.editMessageText('🛑 Turbo Mode has been force stopped. You can now send your message.').catch(() => {});
-});
-
-bot.action('turbo_cancel', async (ctx) => {
-    await ctx.deleteMessage().catch(() => {});
+bot.action(/^perm_mode_(.+)$/, async (ctx) => {
+    const modeKey = ctx.match[1];
+    try {
+        await ctx.answerCbQuery(`Switching to ${modeKey}...`);
+        const res = await selectPermissionMode(CDP_PORT, modeKey);
+        if (res.ok && res.mode) {
+            const updatedMsg =
+                `🛡️ <b>Antigravity Native Permission Mode</b>\n` +
+                `Current: <b>${res.mode.shortLabel}</b> ✅`;
+            if (ctx.callbackQuery?.message) {
+                await ctx.editMessageText(updatedMsg, {
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: buildPermissionModeKeyboard(res.mode.id) }
+                }).catch(() => {});
+            }
+            await sendMainMenu(ctx, `✅ <b>Permission Mode:</b> ${res.mode.shortLabel}`);
+        } else {
+            await ctx.reply('❌ Could not change permission mode via CDP.');
+        }
+    } catch (e) {
+        await ctx.reply(`❌ Error: ${e.message}`);
+    }
 });
 
 // ===== TEXT MESSAGE HANDLER (Headless mode) =====
@@ -4772,7 +4766,7 @@ let isAgentBusy = false;
         'force_update', 'forceupdate',
         'version', 'menu', 'app', 'fix_shortcuts', 'restart', 'goal', 'plan', 'schedule_task', 'schedule_setup',
         'schedule_list', 'schedule_add', 'schedule_del', 'schedule_status', 'login', 'logincode', 'accounts',
-        'switchacc', 'getinfo', 'delacc', 'gettask', 'getplan', 'getwalk', 'watcher', 'turbo', 'panel', 'ask'
+        'switchacc', 'getinfo', 'delacc', 'gettask', 'getplan', 'getwalk', 'watcher', 'turbo', 'mode', 'permissions', 'panel', 'ask'
     ]);
 
     bot.on('text', async (ctx, next) => {
@@ -4796,7 +4790,7 @@ let isAgentBusy = false;
     }
 
     // If agent is already processing, just send the follow-up message without starting a new wait loop
-    if (isAgentBusy && !isTurboMode) {
+    if (isAgentBusy) {
         try {
             if (explicitThreadName) await switchAgentThread(CDP_PORT, explicitThreadName).catch(()=>{});
             await sendViaCDPWithRecovery(query, explicitTargetId);
@@ -4817,85 +4811,56 @@ let isAgentBusy = false;
             let text = "";
             let interactiveButtons = null;
 
-            if (isTurboMode) {
-                isTurboRunning = true;
-                if (global.__taskWatcher) global.__taskWatcher.setBusy(true);
-                try {
-                    const turboTargetId = explicitTargetId || getPreferredTargetId() || null;
-                    text = await runTurboOrchestration(query, CDP_PORT, turboTargetId, ctx, createProgressHandler, stripQueryFromResponse);
-                    targetId = turboTargetId;
-                } finally {
-                    isTurboRunning = false;
-                    if (global.__taskWatcher) {
-                        global.__taskWatcher.setBusy(false);
-                        global.__taskWatcher.syncBaseline();
-                    }
+            isAgentBusy = true;
+            if (global.__taskWatcher) global.__taskWatcher.setBusy(true);
+            try {
+                const result = await sendViaCDPWithRecovery(query, explicitTargetId);
+                if (typeof result === 'string') {
+                    targetId = result;
+                } else if (result && result.targetId) {
+                    targetId = result.targetId;
+                } else {
+                    targetId = explicitTargetId || targetId;
                 }
-            } else {
-                isAgentBusy = true;
-                if (global.__taskWatcher) global.__taskWatcher.setBusy(true);
-                try {
-                    const result = await sendViaCDPWithRecovery(query, explicitTargetId);
-                    if (typeof result === 'string') {
-                        targetId = result;
-                    } else if (result && result.targetId) {
-                        targetId = result.targetId;
-                    } else {
-                        targetId = explicitTargetId || targetId;
-                    }
-                    
-                    if (targetId === "INVALID_MODAL_OPTION") {
-                        return await ctx.reply(t('error.modal_active') || 'A modal is currently active in the IDE. Please select a valid option or dismiss it before sending a message.');
-                    }
-                    setReaction(ctx, REACTION.THINKING).catch(() => {});
+                
+                if (targetId === "INVALID_MODAL_OPTION") {
+                    return await ctx.reply(t('error.modal_active') || 'A modal is currently active in the IDE. Please select a valid option or dismiss it before sending a message.');
+                }
+                setReaction(ctx, REACTION.THINKING).catch(() => {});
 
-                    // Wait briefly for message to render in DOM before anchoring state
+                // Wait briefly for message to render in DOM before anchoring state
+                await new Promise(r => setTimeout(r, 500));
+                await snapshotChatState(CDP_PORT, targetId).catch(() => {});
+                
+                const isDone = await waitForAgentResponse(CDP_PORT, 450000, createProgressHandler(ctx), targetId);
+                if (isDone) {
                     await new Promise(r => setTimeout(r, 500));
-                    await snapshotChatState(CDP_PORT, targetId).catch(() => {});
+                    let _latestRes = await getFullLatestResponse(CDP_PORT, targetId, explicitThreadName);
+                    text = typeof _latestRes === 'string' ? _latestRes : _latestRes.text;
+                    interactiveButtons = typeof _latestRes === 'string' ? null : _latestRes.buttons;
                     
-                    const isDone = await waitForAgentResponse(CDP_PORT, 450000, createProgressHandler(ctx), targetId);
-                    if (isDone) {
-                        await new Promise(r => setTimeout(r, 500));
-                        let _latestRes = await getFullLatestResponse(CDP_PORT, targetId, explicitThreadName);
-                        text = typeof _latestRes === 'string' ? _latestRes : _latestRes.text;
-                        interactiveButtons = typeof _latestRes === 'string' ? null : _latestRes.buttons;
-                        
-                        text = stripQueryFromResponse(text, query);
-                    } else {
-                        return await ctx.reply(t('ask.timeout'));
-                    }
-
-                    if (!text) text = t('ask.done_empty');
-                    const header = await getChatHeader(targetId, t('ask.done'));
-                    const buttons = interactiveButtons ? interactiveButtons : await buildMainMenu(null, null, targetId);
-                    
-                    const sentIds = await sendBotMessage(ctx, text, header, buttons, ctx.message.message_id);
-                    if (sentIds && sentIds.length > 0 && targetId) {
-                        const activeInfo = await getActiveThreadInfo(CDP_PORT, targetId).catch(() => null);
-                        const currentThreadName = activeInfo ? activeInfo.name : null;
-                        sentIds.forEach(id => messageTargetMap.set(id, { targetId, threadName: currentThreadName }));
-                        saveMessageTargetMap(messageTargetMap);
-                    }
-                } finally {
-                    isAgentBusy = false;
-                    if (global.__taskWatcher) {
-                        global.__taskWatcher.setBusy(false);
-                        global.__taskWatcher.syncBaseline();
-                    }
+                    text = stripQueryFromResponse(text, query);
+                } else {
+                    return await ctx.reply(t('ask.timeout'));
                 }
-                return;
-            }
 
-            if (!text) text = t('ask.done_empty');
-            const header = await getChatHeader(targetId, t('ask.done'));
-            const buttons = interactiveButtons ? interactiveButtons : await buildMainMenu(null, null, targetId);
-            
-            const sentIds = await sendBotMessage(ctx, text, header, buttons, ctx.message.message_id);
-            if (sentIds && sentIds.length > 0 && targetId) {
-                const activeInfo = await getActiveThreadInfo(CDP_PORT, targetId).catch(() => null);
-                const currentThreadName = activeInfo ? activeInfo.name : null;
-                sentIds.forEach(id => messageTargetMap.set(id, { targetId, threadName: currentThreadName }));
-                saveMessageTargetMap(messageTargetMap);
+                if (!text) text = t('ask.done_empty');
+                const header = await getChatHeader(targetId, t('ask.done'));
+                const buttons = interactiveButtons ? interactiveButtons : await buildMainMenu(null, null, targetId);
+                
+                const sentIds = await sendBotMessage(ctx, text, header, buttons, ctx.message.message_id);
+                if (sentIds && sentIds.length > 0 && targetId) {
+                    const activeInfo = await getActiveThreadInfo(CDP_PORT, targetId).catch(() => null);
+                    const currentThreadName = activeInfo ? activeInfo.name : null;
+                    sentIds.forEach(id => messageTargetMap.set(id, { targetId, threadName: currentThreadName }));
+                    saveMessageTargetMap(messageTargetMap);
+                }
+            } finally {
+                isAgentBusy = false;
+                if (global.__taskWatcher) {
+                    global.__taskWatcher.setBusy(false);
+                    global.__taskWatcher.syncBaseline();
+                }
             }
         } catch(err) {
             isAgentBusy = false;
@@ -5092,14 +5057,17 @@ async function init() {
         console.error("Could not set commands", e.message);
     }
     
-    // Auto-accept defaults to false, unless explicitly enabled by env
-    if (process.env.AUTOACCEPT_DEFAULT === 'true') {
-        console.log('[autoaccept] Auto-starting (AUTOACCEPT_DEFAULT=true)...');
+    // Auto-accept is only used for Classic IDE; Standalone App uses native Permission Modes (Turbo/Auto/Default/Review)
+    const initPreferredApp = (process.env.ANTIGRAVITY_PREFERRED_APP || 'agent').toLowerCase();
+    if (initPreferredApp === 'ide' && process.env.AUTOACCEPT_DEFAULT === 'true') {
+        console.log('[autoaccept] Auto-starting for Classic IDE (AUTOACCEPT_DEFAULT=true)...');
         autoaccept.enable(CDP_PORT).then(r => {
             console.log(`[autoaccept] Auto-start result: injected=${r.injected}`);
         }).catch(e => {
             console.log(`[autoaccept] Auto-start failed: ${e.message} (will retry via heartbeat)`);
         });
+    } else if (initPreferredApp === 'agent') {
+        console.log('[permissions] Standalone App active — using native Permission Mode selector (/mode, /turbo).');
     } else {
         console.log('[autoaccept] Disabled by default. Use /autoaccept on to enable.');
     }

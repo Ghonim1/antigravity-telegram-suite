@@ -1922,58 +1922,98 @@ async function triggerNewChat(port) {
             const res = await Runtime.evaluate({
                 expression: `
                     ${DriverFactory.getDriver().getLocatorsScript()}
-                    (() => {
-                        const activeWs = ${activeWsStr};
+                    (async () => {
+                        let activeWs = ${activeWsStr};
+                        if (!activeWs) {
+                            const crumbs = Array.from(document.querySelectorAll('[data-testid="breadcrumb-segment"]'));
+                            if (crumbs.length >= 1) {
+                                const candidateWs = crumbs[0].textContent.trim().toLowerCase();
+                                if (candidateWs && candidateWs !== 'antigravity') activeWs = candidateWs;
+                            }
+                        }
+
                         if (activeWs) {
-                            const cards = Array.from(document.querySelectorAll('[data-project-card="true"], [data-workspace-card="true"]'));
-                            const targetCard = cards.find(card => {
-                                const cloned = card.cloneNode(true);
-                                cloned.querySelectorAll('svg').forEach(el => el.remove());
-                                const wsNameRaw = cloned.textContent.trim();
-                                const wsNameCleaned = wsNameRaw.replace(/\\s+\\d+$/, '').trim().toLowerCase();
-                                return wsNameCleaned === activeWs || wsNameCleaned.includes(activeWs) || activeWs.includes(wsNameCleaned);
-                            });
-                            
-                            if (targetCard) {
-                                // Standalone Agent 2.0 new conversation link
-                                const parent = targetCard.parentElement;
-                                const newConvLink = parent ? parent.querySelector('a[aria-label*="New Conversation" i]') : null;
+                            const normalize = s => (s || '').toLowerCase().replace(/[^\\p{L}\\p{N}]/gu, '');
+                            const targetNorm = normalize(activeWs);
+                            const baseNorm = normalize(activeWs.split('/').filter(Boolean).pop() || activeWs);
+                            const isMatch = (text) => {
+                                if (!text) return false;
+                                const norm = normalize(text.trim().replace(/\\s+\\d+$/, ''));
+                                return norm && (norm === targetNorm || norm === baseNorm || norm.includes(targetNorm) || targetNorm.includes(norm) || norm.includes(baseNorm) || baseNorm.includes(norm));
+                            };
+
+                            const tryClickVisibleWorkspace = () => {
+                                const cards = Array.from(document.querySelectorAll('[data-project-card="true"], [data-testid="project-header"], button[class*="headerbtn"], [data-workspace-card="true"]'));
+                                const targetCard = cards.find(card => {
+                                    const label = card.getAttribute('data-project-label') || '';
+                                    if (isMatch(label)) return true;
+                                    const cloned = card.cloneNode(true);
+                                    cloned.querySelectorAll('svg').forEach(el => el.remove());
+                                    return isMatch(cloned.textContent);
+                                });
+                                if (!targetCard) return null;
+
+                                const headerWrapper = targetCard.closest('.group\\\\/header') || targetCard.parentElement?.parentElement || targetCard.parentElement;
+                                const newConvLink = headerWrapper ? headerWrapper.querySelector('a[aria-label*="New Conversation" i], a[href*="section="]') : null;
                                 if (newConvLink && typeof newConvLink.click === 'function') {
                                     newConvLink.click();
-                                    return { clicked: true, tag: newConvLink.tagName, type: 'workspace-specific-link' };
+                                    return { clicked: true, tag: newConvLink.tagName, type: 'workspace-specific-link', href: newConvLink.getAttribute('href') };
                                 }
 
-                                const plusIcon = targetCard.querySelector('button[aria-label*="New" i], svg.lucide-plus, svg.lucide-message-square-plus, svg[class*="plus"]') || 
-                                                 targetCard.querySelector('path[d="M450-450H220v-60H450V-740h60v230H740v60H510v230H450V-450Z"]');
+                                const plusIcon = (headerWrapper || targetCard).querySelector('button[aria-label*="New" i], svg.lucide-plus, svg.lucide-message-square-plus, svg[class*="plus"]') || 
+                                                 (headerWrapper || targetCard).querySelector('path[d="M450-450H220v-60H450V-740h60v230H740v60H510v230H450V-450Z"]');
                                 const plusBtn = plusIcon?.closest('button, [role="button"], a') || (plusIcon && plusIcon.parentElement);
-                                
                                 if (plusBtn && typeof plusBtn.click === 'function') {
                                     plusBtn.click();
                                     return { clicked: true, tag: plusBtn.tagName, type: 'workspace-specific' };
-                                } else {
-                                    // Fallback: targetCard might be a link or have its own click behavior 
-                                    // if there's no explicitly separated + button but we expect workspace to activate
-                                    const parent = targetCard.closest('[role="button"]') || targetCard.parentElement;
-                                    if (parent) {
-                                        const pPlusIcon = parent.querySelector('button[aria-label*="New" i], svg.lucide-plus, svg.lucide-message-square-plus, svg[class*="plus"]');
-                                        const pPlusBtn = pPlusIcon?.closest('button, [role="button"], a') || pPlusIcon?.parentElement || pPlusIcon;
-                                        if (pPlusBtn && typeof pPlusBtn.click === 'function') {
-                                            pPlusBtn.click();
-                                            return { clicked: true, tag: pPlusBtn.tagName, type: 'workspace-specific-parent' };
-                                        }
+                                }
+                                return null;
+                            };
+
+                            let clickedRes = tryClickVisibleWorkspace();
+                            if (clickedRes) {
+                                await new Promise(r => setTimeout(r, 350));
+                                return clickedRes;
+                            }
+
+                            const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
+                                             Array.from(document.querySelectorAll("*")).find(el => {
+                                                 const s = window.getComputedStyle(el);
+                                                 return (s.overflowY === "auto" || s.overflowY === "scroll") && el.scrollHeight > el.clientHeight;
+                                             });
+                            if (scrollEl) {
+                                const origScroll = scrollEl.scrollTop;
+                                const totalHeight = scrollEl.scrollHeight;
+                                const step = 250;
+                                scrollEl.scrollTop = 0;
+                                await new Promise(r => setTimeout(r, 60));
+                                for (let pos = 0; pos <= totalHeight + step; pos += step) {
+                                    if (pos > 0) {
+                                        scrollEl.scrollTop = pos;
+                                        await new Promise(r => setTimeout(r, 60));
+                                    }
+                                    clickedRes = tryClickVisibleWorkspace();
+                                    if (clickedRes) {
+                                        scrollEl.scrollTop = origScroll;
+                                        await new Promise(r => setTimeout(r, 350));
+                                        return clickedRes;
                                     }
                                 }
+                                scrollEl.scrollTop = origScroll;
                             }
                         }
 
                         const btn = AG_UI.getNewChatButton();
                         if (btn && typeof btn.click === 'function') {
                             btn.click();
-                            return { clicked: true, tag: btn.tagName, type: 'generic' };
+                            await new Promise(r => setTimeout(r, 350));
+                            return { clicked: true, tag: btn.tagName, type: 'generic', href: btn.getAttribute('href') };
                         }
                         return { clicked: false };
                     })()
-                `, returnByValue: true
+                `,
+                awaitPromise: true,
+                returnByValue: true
             });
             await client.close();
             const val = res.result?.value;
@@ -2209,16 +2249,42 @@ async function switchAgentThread(port, threadName, targetWorkspaceName = null, t
 
                 if (threadId) {
                     const directRes = await Runtime.evaluate({
-                        expression: `(() => {
+                        expression: `(async () => {
                             const targetId = ${JSON.stringify(threadId)};
-                            const link = document.querySelector('a[href*="' + targetId + '"]');
+                            let link = document.querySelector('a[href*="' + targetId + '"]');
                             if (link) {
                                 link.click();
                                 return 'clicked';
                             }
+                            const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
+                                             Array.from(document.querySelectorAll("*")).find(el => {
+                                                 const s = window.getComputedStyle(el);
+                                                 return (s.overflowY === "auto" || s.overflowY === "scroll") && el.scrollHeight > el.clientHeight;
+                                             });
+                            if (scrollEl) {
+                                const origScroll = scrollEl.scrollTop;
+                                const totalHeight = scrollEl.scrollHeight || 0;
+                                const step = 250;
+                                scrollEl.scrollTop = 0;
+                                await new Promise(r => setTimeout(r, 60));
+                                for (let pos = 0; pos <= totalHeight + step; pos += step) {
+                                    if (pos > 0) {
+                                        scrollEl.scrollTop = pos;
+                                        await new Promise(r => setTimeout(r, 60));
+                                    }
+                                    link = document.querySelector('a[href*="' + targetId + '"]');
+                                    if (link) {
+                                        link.click();
+                                        scrollEl.scrollTop = origScroll;
+                                        return 'clicked';
+                                    }
+                                }
+                                scrollEl.scrollTop = origScroll;
+                            }
                             window.location.href = window.location.origin + '/c/' + targetId;
                             return 'clicked';
                         })()`,
+                        awaitPromise: true,
                         returnByValue: true
                     });
 
@@ -2641,6 +2707,101 @@ async function getCurrentModel(port) {
     return lastKnownModel || null;
 }
 
+let lastKnownPermissionMode = null;
+
+function normalizePermissionMode(rawText) {
+    const txt = (rawText || '').trim();
+    if (!txt) return null;
+    if (/turbo/i.test(txt)) {
+        return { id: 'turbo', label: 'Turbo', shortLabel: '🚀 Turbo' };
+    }
+    if (/auto/i.test(txt)) {
+        return { id: 'auto', label: 'Auto (Preview)', shortLabel: '⚡ Auto' };
+    }
+    if (/request\s*review|review/i.test(txt)) {
+        return { id: 'request_review', label: 'Request Review', shortLabel: '🔒 Review' };
+    }
+    if (/default/i.test(txt)) {
+        return { id: 'default', label: 'Default', shortLabel: '🛡️ Default' };
+    }
+    return { id: txt.toLowerCase().replace(/\s+/g, '_'), label: txt, shortLabel: `⚙️ ${txt}` };
+}
+
+async function getCurrentPermissionMode(port) {
+    const candidates = await resolveTargets(port, false);
+    for (const target of candidates) {
+        try {
+            const client = await withTimeout(CDP({ target: target.webSocketDebuggerUrl }), 2000, "CDP timeout");
+            const { Runtime } = client;
+            await Runtime.enable();
+            const check = await withTimeout(Runtime.evaluate({
+                expression: `(function() {
+                    const btn = document.querySelector('[data-testid="permissions-selector-trigger"]');
+                    if (!btn) return null;
+                    return (btn.textContent || '').trim() || null;
+                })()`,
+                returnByValue: true
+            }), 2500, "Evaluate timeout");
+            await client.close();
+            if (check?.result?.value) {
+                const parsed = normalizePermissionMode(check.result.value);
+                if (parsed) {
+                    lastKnownPermissionMode = parsed;
+                    return parsed;
+                }
+            }
+        } catch (e) {}
+    }
+    return lastKnownPermissionMode || null;
+}
+
+async function selectPermissionMode(port, modeInput) {
+    const raw = (modeInput || '').trim().toLowerCase();
+    let modeKey = 'default';
+    if (raw === 'turbo' || raw.includes('turbo')) modeKey = 'turbo';
+    else if (raw === 'auto' || raw.includes('auto')) modeKey = 'auto';
+    else if (raw === 'request_review' || raw === 'review' || raw.includes('review')) modeKey = 'request_review';
+    else if (raw === 'default' || raw.includes('default')) modeKey = 'default';
+    else return { ok: false, reason: 'invalid_mode' };
+
+    const candidates = await resolveTargets(port, false);
+    for (const target of candidates) {
+        let client;
+        try {
+            client = await withTimeout(CDP({ target: target.webSocketDebuggerUrl }), 2500, "CDP timeout");
+            const { Runtime } = client;
+            await Runtime.enable();
+            const res = await withTimeout(Runtime.evaluate({
+                expression: `(async () => {
+                    const btn = document.querySelector('[data-testid="permissions-selector-trigger"]');
+                    if (!btn) return { ok: false, reason: 'no_trigger' };
+                    if (btn.getAttribute('aria-expanded') !== 'true') {
+                        btn.click();
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                    const opt = document.querySelector('[data-testid="permissions-preset-option-' + ${JSON.stringify(modeKey)} + '"]');
+                    if (!opt) return { ok: false, reason: 'no_option_' + ${JSON.stringify(modeKey)} };
+                    opt.click();
+                    await new Promise(r => setTimeout(r, 200));
+                    return { ok: true, current: (btn.textContent || '').trim() };
+                })()`,
+                awaitPromise: true,
+                returnByValue: true
+            }), 4000, "Evaluate timeout");
+            await client.close();
+            const val = res?.result?.value;
+            if (val && val.ok) {
+                const parsed = normalizePermissionMode(val.current) || normalizePermissionMode(modeKey);
+                if (parsed) lastKnownPermissionMode = parsed;
+                return { ok: true, mode: parsed };
+            }
+        } catch (e) {
+            try { if (client) await client.close(); } catch (_) {}
+        }
+    }
+    return { ok: false, reason: 'target_not_found' };
+}
+
 async function switchStandaloneWorkspace(port, wsName, wsPath = null) {
     if (!wsName) return false;
     const candidates = await resolveTargets(port, false);
@@ -2662,15 +2823,70 @@ async function switchStandaloneWorkspace(port, wsName, wsPath = null) {
                     const isMatch = (text) => {
                         if (!text) return false;
                         const norm = normalize(text.trim().replace(/\\s+\\d+$/, ''));
-                        return norm === targetNorm || norm === baseNorm || norm.includes(targetNorm) || targetNorm.includes(norm) || norm.includes(baseNorm) || baseNorm.includes(norm);
+                        return norm && (norm === targetNorm || norm === baseNorm || norm.includes(targetNorm) || targetNorm.includes(norm) || norm.includes(baseNorm) || baseNorm.includes(norm));
                     };
 
-                    // Strategy 1: Top Project Pill Menu
+                    const findAndClickProjectInSidebar = () => {
+                        const headers = Array.from(document.querySelectorAll('button[data-testid="project-header"], [data-project-card="true"], button[class*="headerbtn"]'));
+                        for (const h of headers) {
+                            const label = h.getAttribute('data-project-label') || h.textContent;
+                            if (isMatch(label)) {
+                                const container = h.closest('.group\\\\/header') || h.parentElement?.parentElement || h.parentElement;
+                                const newConvBtn = container ? container.querySelector('a[aria-label*="New Conversation" i], a[href*="section="]') : null;
+                                if (newConvBtn) {
+                                    newConvBtn.click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    };
+
+                    // Strategy 1: Sidebar Virtualized List (Header -> New Conversation in Project)
                     try {
-                        const pillBtn = Array.from(document.querySelectorAll('button')).find(b => 
-                            b.className && typeof b.className === 'string' && b.className.includes('rounded-full') &&
-                            b.parentElement?.querySelector('button[aria-label*="context" i], button[aria-label*="model" i], [data-testid*="model-selector"]')
-                        ) || Array.from(document.querySelectorAll('button')).find(b => b.className && typeof b.className === 'string' && b.className.includes('rounded-full') && !b.getAttribute('aria-label'));
+                        if (findAndClickProjectInSidebar()) {
+                            await new Promise(r => setTimeout(r, 400));
+                            return true;
+                        }
+
+                        const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
+                                         Array.from(document.querySelectorAll("*")).find(el => {
+                                             const s = window.getComputedStyle(el);
+                                             return (s.overflowY === "auto" || s.overflowY === "scroll") && el.scrollHeight > el.clientHeight;
+                                         });
+
+                        if (scrollEl) {
+                            const origScroll = scrollEl.scrollTop;
+                            const totalHeight = scrollEl.scrollHeight || 0;
+                            const step = 250;
+
+                            scrollEl.scrollTop = 0;
+                            await new Promise(r => setTimeout(r, 60));
+
+                            for (let pos = 0; pos <= totalHeight + step; pos += step) {
+                                if (pos > 0) {
+                                    scrollEl.scrollTop = pos;
+                                    await new Promise(r => setTimeout(r, 60));
+                                }
+
+                                if (findAndClickProjectInSidebar()) {
+                                    scrollEl.scrollTop = origScroll;
+                                    await new Promise(r => setTimeout(r, 400));
+                                    return true;
+                                }
+                            }
+                            scrollEl.scrollTop = origScroll;
+                        }
+                    } catch (e) {}
+
+                    // Strategy 2: Top Project Pill Menu (when on new conversation root screen)
+                    try {
+                        const pillBtn = Array.from(document.querySelectorAll('button[data-testid*="project-selector"], button[aria-label*="Select project" i]'))[0] ||
+                                        Array.from(document.querySelectorAll('button')).find(b => 
+                                            b.className && typeof b.className === 'string' && b.className.includes('rounded-full') &&
+                                            b.parentElement?.querySelector('button[aria-label*="context" i], button[aria-label*="model" i], [data-testid*="model-selector"]') &&
+                                            !b.closest('[data-testid="agent-input-box"]')
+                                        );
 
                         if (pillBtn) {
                             pillBtn.click();
@@ -2686,52 +2902,10 @@ async function switchStandaloneWorkspace(port, wsName, wsPath = null) {
                                     await new Promise(r => setTimeout(r, 400));
                                     return true;
                                 }
-                                // Close menu if not found
                                 const esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true });
                                 document.activeElement?.dispatchEvent(esc);
                                 document.dispatchEvent(esc);
                                 await new Promise(r => setTimeout(r, 150));
-                            }
-                        }
-                    } catch (e) {}
-
-                    // Strategy 2: Sidebar Virtualized List (Header / New Conversation in Project)
-                    try {
-                        const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
-                                         Array.from(document.querySelectorAll("*")).find(el => {
-                                             const s = window.getComputedStyle(el);
-                                             return (s.overflowY === "auto" || s.overflowY === "scroll") && el.scrollHeight > el.clientHeight;
-                                         });
-
-                        const totalHeight = scrollEl ? scrollEl.scrollHeight : 0;
-                        const step = 250;
-
-                        if (scrollEl) {
-                            scrollEl.scrollTop = 0;
-                            await new Promise(r => setTimeout(r, 80));
-                        }
-
-                        for (let pos = 0; pos <= totalHeight + step; pos += step) {
-                            if (scrollEl && pos > 0) {
-                                scrollEl.scrollTop = pos;
-                                await new Promise(r => setTimeout(r, 70));
-                            }
-
-                            const headers = Array.from(document.querySelectorAll('button')).filter(b => (b.className || '').includes('headerbtn'));
-                            for (const h of headers) {
-                                if (isMatch(h.textContent)) {
-                                    const container = h.parentElement;
-                                    const newConvBtn = container ? container.querySelector('a[aria-label*="New Conversation" i], a[href*="section="]') : null;
-                                    if (newConvBtn) {
-                                        newConvBtn.click();
-                                        await new Promise(r => setTimeout(r, 400));
-                                        return true;
-                                    } else {
-                                        h.click();
-                                        await new Promise(r => setTimeout(r, 400));
-                                        return true;
-                                    }
-                                }
                             }
                         }
                     } catch (e) {}
@@ -2934,6 +3108,8 @@ module.exports = {
     getAvailableModels,
     selectModel,
     getCurrentModel,
+    getCurrentPermissionMode,
+    selectPermissionMode,
     stopAgent,
     getQuota,
     resolveTargets,

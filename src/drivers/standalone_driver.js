@@ -23,7 +23,38 @@ class StandaloneDriver extends BaseDriver {
             } catch (e) {}
 
             let workspace = null;
-            if (threadIdVal) {
+
+            // Fast path: Standalone 2.23+ titlebar breadcrumbs
+            const crumbs = Array.from(document.querySelectorAll('[data-testid="breadcrumb-segment"]'));
+            if (crumbs.length >= 2) {
+                workspace = crumbs[0].textContent.trim();
+                name = crumbs[1].textContent.trim();
+                nameSource = 'breadcrumb';
+            } else if (crumbs.length === 1) {
+                const seg = crumbs[0].textContent.trim();
+                if (seg && seg.toLowerCase() !== 'antigravity') {
+                    workspace = seg;
+                }
+            }
+
+            // Secondary fast path: match ?section=<id> to sidebar project header
+            if (!workspace) {
+                try {
+                    const sectionId = new URLSearchParams(window.location.search).get('section');
+                    if (sectionId) {
+                        const secLink = document.querySelector('a[href*="section=' + sectionId + '"]');
+                        if (secLink) {
+                            const wrapper = secLink.closest('.group\\\\/header') || secLink.parentElement?.parentElement;
+                            const h = wrapper ? wrapper.querySelector('button[data-testid="project-header"], button[class*="headerbtn"]') : null;
+                            if (h) {
+                                workspace = (h.getAttribute('data-project-label') || h.textContent || '').trim().replace(/\\s+\\d+$/, '');
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            if (!workspace && threadIdVal) {
                 const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
                                  Array.from(document.querySelectorAll("*")).find(el => {
                                      const s = window.getComputedStyle(el);
@@ -51,7 +82,7 @@ class StandaloneDriver extends BaseDriver {
                         }
                     }
                     if (matchingHeader) {
-                        workspace = matchingHeader.textContent.trim().replace(/\\s+\\d+$/, '');
+                        workspace = (matchingHeader.getAttribute('data-project-label') || matchingHeader.textContent || '').trim().replace(/\\s+\\d+$/, '');
                     }
                 }
 
@@ -65,7 +96,7 @@ class StandaloneDriver extends BaseDriver {
                 if (wsEl2) workspace = wsEl2.textContent.trim();
             }
 
-            if (name) {
+            if (name && nameSource !== 'breadcrumb') {
                 name = name.replace(/\\s+-\\s+Antigravity$/i, '');
                 if (workspace && name.toLowerCase().endsWith(' - ' + workspace.toLowerCase())) {
                     name = name.slice(0, -(' - ' + workspace).length).trim();
@@ -169,7 +200,7 @@ class StandaloneDriver extends BaseDriver {
 
     getListAgentThreadsScript() {
         return `(async () => {
-            const header = document.querySelector('button[class*="headerbtn"]');
+            const header = document.querySelector('button[data-testid="project-header"], button[class*="headerbtn"], a[href*="/c/"]');
             if (header) {
                 const scrollEl = document.querySelector(".relative.w-full.h-full.overflow-y-auto.overscroll-none.px-2") ||
                                  Array.from(document.querySelectorAll("*")).find(el => {
@@ -195,7 +226,7 @@ class StandaloneDriver extends BaseDriver {
                         await new Promise(r => setTimeout(r, 70));
                     }
 
-                    const headers = Array.from(document.querySelectorAll("button")).filter(b => (b.className || "").includes("headerbtn"));
+                    const headers = Array.from(document.querySelectorAll('button[data-testid="project-header"], button[class*="headerbtn"]'));
                     const links = Array.from(document.querySelectorAll("a[href*=\x27/c/\x27]"));
 
                     for (const link of links) {
@@ -209,8 +240,21 @@ class StandaloneDriver extends BaseDriver {
                             }
                         }
 
-                        const wsName = matchingHeader ? matchingHeader.textContent.trim().replace(/\\s+\\d+$/, "") : lastKnownWs;
-                        if (matchingHeader && matchingHeader.textContent.trim()) lastKnownWs = wsName;
+                        const headerWs = matchingHeader
+                            ? (matchingHeader.getAttribute("data-project-label") || matchingHeader.textContent || "").trim().replace(/\\s+\\d+$/, "")
+                            : null;
+                        if (headerWs) lastKnownWs = headerWs;
+
+                        let rowWs = null;
+                        const row = link.closest("div") || link.parentElement;
+                        if (row && row.innerText) {
+                            const rowLines = row.innerText.split("\\n").map(s => s.trim()).filter(Boolean);
+                            if (rowLines.length >= 2 && rowLines[0] === title && !/^[0-9]+[smhd]$|^[0-9]+:[0-9]+|^[0-9]+\\s*(min|hour|day|sec|mo|wk|yr)/i.test(rowLines[1])) {
+                                rowWs = rowLines[1];
+                            }
+                        }
+
+                        const wsName = rowWs || headerWs || lastKnownWs;
 
                         if (!foundWorkspaces.has(wsName)) {
                             foundWorkspaces.set(wsName, { workspace: wsName, threads: new Map() });
@@ -219,7 +263,6 @@ class StandaloneDriver extends BaseDriver {
                         const wsObj = foundWorkspaces.get(wsName);
                         if (!wsObj.threads.has(title)) {
                             let time = "";
-                            const row = link.closest("div") || link.parentElement;
                             if (row) {
                                 const timeSpan = Array.from(row.querySelectorAll("span, p, div")).find(s => 
                                     s.textContent.trim() !== title && 

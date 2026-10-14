@@ -5,12 +5,24 @@ All notable changes to this project will be documented in this file.
 ## [3.8.7] - 2026-10-14
 
 ### Added
+- **Antigravity Native Permission Mode Selector (`/turbo`, `/mode`, `/permissions`)**:
+  - Replaced the bottom reply-keyboard button (`🚀 Turbo` / `⚡ Auto` / `🛡️ Default` / `🔒 Review`) and `/turbo`, `/mode`, `/permissions` (plus `/autoaccept` in Standalone mode) with a live interactive inline keyboard that reads and switches Antigravity Standalone 2.23.1's native Permissions Preset (`🚀 Turbo`, `⚡ Auto (Preview)`, `🛡️ Default`, `🔒 Request Review`).
+  - Added active permission mode indicator (`🛡️ Mode: 🚀 Turbo`) to `/status`.
 - **Antigravity Standalone 2.23.1 & Next-Gen Models Support**:
-  - Updated default/fallback model lists and Turbo Orchestrator tiers to support `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, and `GPT-OSS 120B (Medium)`.
+  - Updated default/fallback model lists to support `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, and `GPT-OSS 120B (Medium)`.
   - Added `'argon'` keyword detection and new 2.23.1 collapsible thought/tool locators (`[data-testid="thinking-collapsible-trigger"]`, `[data-testid="tool-group-collapsible"]`).
 - **macOS Sleep Prevention (`/caffeinate`)**: Added `caffeinate` integration and `/caffeinate` command to prevent macOS from sleeping during long-running agent tasks, plus `AUTO_UPDATE_ENABLED` env setting (#42).
 
+### Changed
+- **Removed Legacy Multi-Phase Turbo Orchestrator & Standalone `autoaccept`**:
+  - Disabled the legacy DOM MutationObserver `autoaccept` loop (`src/autoaccept/index.js`) when running against Antigravity Standalone App (`agent`), as native `Turbo` / `Auto` permission modes handle tool approvals natively.
+  - Removed the legacy multi-model `Turbo Mode` (`turbo_orchestrator.js`) routing from `src/index.js` due to tight Claude quota constraints and replaced it with native Antigravity permission mode selection.
+
 ### Fixed
+- **Standalone 2.23.1 `/workspace`, `/new`, and `/agents` Navigation**:
+  - Fixed `switchStandaloneWorkspace` and `triggerNewChat` where `button[data-testid="project-header"]` is nested inside `[data-testid="lifted-context-menu-trigger"]` and the project's `a[aria-label="New Conversation in Project"]` (`/?section=<id>`) lives in the outer `.group/header` container across the virtualized sidebar (`scrollEl`).
+  - Hardened `getNewChatButton` to prioritize `?section=<id>` and `[data-testid="new-conversation-button"]` while excluding existing conversation links (`href*="/c/"`) and composer `Add context` buttons.
+  - Fixed `getListAgentThreadsScript` so top-of-sidebar "In Progress / Recent" conversations resolve their actual workspace name from the row's 2nd line instead of being grouped under `"Default"`, and updated `switchAgentThread` to scroll virtualized off-screen threads into view for SPA navigation.
 - **Claude 5.5 Effort Tier Model Switching**: Fixed `/model` failing to switch to `Claude Opus 5.5` and `Claude Sonnet 5.5` in Antigravity 2.23.1 where Claude models use nested Base UI effort submenus (`Low` / `Medium` / `High` `menuitemradio`). Removed the Gemini-only effort parsing restriction in `selectModel`, normalized row matching to `closest('[role="menuitem"]')`, and fixed `currentTier` badge extraction across `New` badges in `getAvailableModels`.
 - **Long Message Truncation (`<truncated N bytes>`) & `transcript_full.jsonl`**: Fixed long responses having their middle replaced with `<truncated XXXX bytes>` by reading and watching `transcript_full.jsonl` instead of the compact `transcript.jsonl` across `cdp_controller.js` and `task_watcher.js`.
 - **Telegram HTML Entity Parsing & Multi-Chunk Delivery (`markdownToTelegramHtml` / `splitTelegramHtmlChunks`)**:

@@ -152,35 +152,60 @@ const STANDALONE_LOCATORS_SCRIPT = `
         },
 
         getNewChatButton: () => {
+            const isInvalidNewChatEl = (el) => {
+                if (!el) return true;
+                const href = el.getAttribute('href') || el.closest('a')?.getAttribute('href') || '';
+                if (href.includes('/c/')) return true;
+                const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+                if (aria.includes('add context') || aria.includes('attach') || aria.includes('create new project') || testid.includes('add-project')) return true;
+                if (el.closest('[data-testid="agent-input-box"], [id*="SidePanelInputBox"]')) return true;
+                return false;
+            };
+
+            // 1. If currently inside a project section (?section=<id>), prefer the New Conversation button for that section
+            try {
+                const sectionId = new URLSearchParams(window.location.search).get('section');
+                if (sectionId) {
+                    const sectionBtn = document.querySelector('a[href="/?section=' + sectionId + '"], a[href*="section=' + sectionId + '"]');
+                    if (sectionBtn && !isInvalidNewChatEl(sectionBtn)) return sectionBtn;
+                }
+            } catch (e) {}
+
+            // 2. Explicit New Conversation test IDs in Standalone 2.23+
+            const explicitBtn = document.querySelector('[data-testid="new-conversation-button"], [data-testid="app-icon-new-conversation-button"], [data-testid="new-chat-button"]');
+            if (explicitBtn && !isInvalidNewChatEl(explicitBtn)) return explicitBtn;
+
+            // 3. Classic SVG path
             const svgPath = document.querySelector('path[d="M12 4.5v15m7.5-7.5h-15"]');
             if (svgPath) {
                 const btn = svgPath.closest('button, a, [role="button"]');
-                if (btn) return btn;
+                if (btn && !isInvalidNewChatEl(btn)) return btn;
             }
             
+            // 4. Icon selectors (excluding input box, add-project buttons, and other projects' section links)
             const iconSelectors = 'svg.lucide-plus, svg.lucide-square-pen, svg.lucide-message-square-plus';
-            const icon = document.querySelector(iconSelectors);
-            if (icon) {
+            const icons = Array.from(document.querySelectorAll(iconSelectors));
+            for (const icon of icons) {
                 const btn = icon.closest('button, a, [role="button"]');
-                if (btn) return btn;
+                if (btn && !isInvalidNewChatEl(btn) && !(btn.getAttribute('href') || '').includes('section=')) return btn;
             }
             
+            // 5. Attribute selectors (excluding /c/ conversation links and other projects' section links)
             const selectors = [
-                '[aria-label*="New Chat" i]',
-                '[title*="New Chat" i]',
-                '[aria-label*="Yeni Sohbet" i]',
-                '[title*="Yeni Sohbet" i]',
-                '[aria-label*="New Conversation" i]',
-                '[title*="New Conversation" i]',
+                '[aria-label="New Conversation" i]',
+                '[aria-label="New Chat" i]',
+                '[aria-label="Yeni Sohbet" i]',
+                '[title="New Conversation" i]',
+                '[title="New Chat" i]',
+                '[title="Yeni Sohbet" i]',
                 '[class*="new-chat"]',
-                '[aria-label*="New Task" i]',
-                '[title*="New Task" i]',
                 '[data-tooltip-id*="new-conversation" i]'
             ];
-            let btn = document.querySelector(selectors.join(', '));
-            if (btn) return btn;
+            const attrBtns = Array.from(document.querySelectorAll(selectors.join(', '))).filter(b => !isInvalidNewChatEl(b) && !(b.getAttribute('href') || '').includes('section='));
+            if (attrBtns.length > 0) return attrBtns[0];
             
-            const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+            const allBtns = Array.from(document.querySelectorAll('button, a, [role="button"]')).filter(b => !isInvalidNewChatEl(b));
             return allBtns.find(b => {
                 const text = (b.textContent || '').trim().toLowerCase();
                 return text === 'new chat' || text === 'new conversation' || text === 'yeni sohbet';
