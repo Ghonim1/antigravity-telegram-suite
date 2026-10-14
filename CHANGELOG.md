@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.8.7] - 2026-10-14
+
+### Added
+- **Antigravity Standalone 2.23.1 & Next-Gen Models Support**:
+  - Updated default/fallback model lists and Turbo Orchestrator tiers to support `Gemini 4 Argon`, `Gemini 3.8 Flash`, `Claude Opus 5.5`, `Claude Sonnet 5.5`, and `GPT-OSS 120B (Medium)`.
+  - Added `'argon'` keyword detection and new 2.23.1 collapsible thought/tool locators (`[data-testid="thinking-collapsible-trigger"]`, `[data-testid="tool-group-collapsible"]`).
+- **macOS Sleep Prevention (`/caffeinate`)**: Added `caffeinate` integration and `/caffeinate` command to prevent macOS from sleeping during long-running agent tasks, plus `AUTO_UPDATE_ENABLED` env setting (#42).
+
+### Fixed
+- **Claude 5.5 Effort Tier Model Switching**: Fixed `/model` failing to switch to `Claude Opus 5.5` and `Claude Sonnet 5.5` in Antigravity 2.23.1 where Claude models use nested Base UI effort submenus (`Low` / `Medium` / `High` `menuitemradio`). Removed the Gemini-only effort parsing restriction in `selectModel`, normalized row matching to `closest('[role="menuitem"]')`, and fixed `currentTier` badge extraction across `New` badges in `getAvailableModels`.
+- **Long Message Truncation (`<truncated N bytes>`) & `transcript_full.jsonl`**: Fixed long responses having their middle replaced with `<truncated XXXX bytes>` by reading and watching `transcript_full.jsonl` instead of the compact `transcript.jsonl` across `cdp_controller.js` and `task_watcher.js`.
+- **Telegram HTML Entity Parsing & Multi-Chunk Delivery (`markdownToTelegramHtml` / `splitTelegramHtmlChunks`)**:
+  - Fixed unordered list bullets (`* `) being paired across newlines as multi-line `<i>...</i>` tags, which caused unclosed HTML tags across 3500-char chunk boundaries (`400: Bad Request: can't parse entities`) and forced plain-text fallback.
+  - Fixed `<pre>` code block state tracking (`inPre`) occurring before chunk-overflow checks in `sendLongMessage` and updated `TaskWatcher` notifications to chunk long messages instead of truncating at 4096 chars.
+- **Standalone 2.23.1 DOM Chat Extraction & Thread Titles**: Updated `getChatExtractExpr()` to support Standalone 2.23.1's unwrapped `[role="article"][aria-label="Agent response"]` structure and stripped `- <workspace> - Antigravity` window title suffixes.
+
 ## [3.8.6] - 2026-08-21
 
 ### Added

@@ -65,6 +65,13 @@ class StandaloneDriver extends BaseDriver {
                 if (wsEl2) workspace = wsEl2.textContent.trim();
             }
 
+            if (name) {
+                name = name.replace(/\\s+-\\s+Antigravity$/i, '');
+                if (workspace && name.toLowerCase().endsWith(' - ' + workspace.toLowerCase())) {
+                    name = name.slice(0, -(' - ' + workspace).length).trim();
+                }
+            }
+
             return { name, workspace, threadId: threadIdVal, nameSource };
         })()`;
     }

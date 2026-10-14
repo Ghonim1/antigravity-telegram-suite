@@ -118,12 +118,14 @@ function findConversationIdByTitle(threadName) {
 
         const dirs = fs.readdirSync(brainPath, { withFileTypes: true });
         
-        // Sort by mtime to search recent threads first — check BOTH overview.txt AND transcript.jsonl
+        // Sort by mtime to search recent threads first — prefer transcript_full.jsonl over compact transcript.jsonl
         const sortedDirs = dirs
             .filter(d => d.isDirectory())
             .map(d => {
-                const overviewPath = path.join(brainPath, d.name, '.system_generated', 'logs', 'overview.txt');
-                const transcriptPath = path.join(brainPath, d.name, '.system_generated', 'logs', 'transcript.jsonl');
+                const logsDir = path.join(brainPath, d.name, '.system_generated', 'logs');
+                const overviewPath = path.join(logsDir, 'overview.txt');
+                const transcriptFullPath = path.join(logsDir, 'transcript_full.jsonl');
+                const transcriptPath = fs.existsSync(transcriptFullPath) ? transcriptFullPath : path.join(logsDir, 'transcript.jsonl');
                 let mtime = 0;
                 let logPath = null;
                 try { if (fs.existsSync(transcriptPath)) { mtime = fs.statSync(transcriptPath).mtimeMs; logPath = transcriptPath; } } catch (_) {}
@@ -426,14 +428,20 @@ function getChatExtractExpr() {
                     const isClassic = typeof AG_UI !== 'undefined' && AG_UI.isClassicIDE && AG_UI.isClassicIDE();
                     let messageNodes = [];
 
+                    const listSelector = '.relative.flex.flex-col.gap-y-3, .relative.flex.flex-col.gap-y-3.px-4, .monaco-list-rows, [class*="message-list"], .chat-messages, [data-testid*="message-list"]';
+                    const list = container.matches && container.matches(listSelector) ? container : (container.querySelector ? container.querySelector(listSelector) : null);
+
                     if (!isClassic) {
-                        messageNodes = Array.from(container.querySelectorAll('.rounded-xl.bg-card-border, .rounded-2xl.bg-card-border'));
+                        const cardNodes = Array.from(container.querySelectorAll('.rounded-xl.bg-card-border, .rounded-2xl.bg-card-border'));
+                        const hasStandaloneArticles = !!container.querySelector('[role="article"][aria-label="Agent response"]');
+                        const agentInsideCard = cardNodes.some(n => n.querySelector('[role="article"][aria-label="Agent response"]') || n.getAttribute('aria-label') === 'Agent response');
+                        if (cardNodes.length > 0 && (!hasStandaloneArticles || agentInsideCard)) {
+                            messageNodes = cardNodes;
+                        }
                     }
 
-                    if (messageNodes.length === 0) {
-                        const listSelector = '.relative.flex.flex-col.gap-y-3, .relative.flex.flex-col.gap-y-3.px-4, .monaco-list-rows, [class*="message-list"], .chat-messages, [data-testid*="message-list"]';
-                        const list = container.matches && container.matches(listSelector) ? container : (container.querySelector ? container.querySelector(listSelector) : null);
-                        if (list) messageNodes = Array.from(list.children);
+                    if (messageNodes.length === 0 && list) {
+                        messageNodes = Array.from(list.children).filter(el => el.tagName !== 'H1' && !el.classList.contains('sr-only'));
                     }
                 if (messageNodes.length > 0) {
                     const msgs = [];
@@ -665,7 +673,7 @@ async function snapshotChatState(port, specificTargetId = null, threadName = nul
         if (resolvedId) {
             const appDataName = DriverFactory.getDriver().appDataName;
             const logsDir = path.join(os.homedir(), '.gemini', appDataName, 'brain', resolvedId, '.system_generated', 'logs');
-            const hasLogs = fs.existsSync(path.join(logsDir, 'overview.txt')) || fs.existsSync(path.join(logsDir, 'transcript.jsonl'));
+            const hasLogs = fs.existsSync(path.join(logsDir, 'overview.txt')) || fs.existsSync(path.join(logsDir, 'transcript_full.jsonl')) || fs.existsSync(path.join(logsDir, 'transcript.jsonl'));
             if (hasLogs) {
                 lastResolvedThreadId = resolvedId;
                 _notifyThreadResolved(resolvedId);
@@ -727,7 +735,9 @@ async function snapshotChatState(port, specificTargetId = null, threadName = nul
                                 .sort((a, b) => b.time - a.time);
 
                             for (const dir of dirs) {
-                                const tp = path.join(brainPath, dir.name, '.system_generated', 'logs', 'transcript.jsonl');
+                                const logsDir = path.join(brainPath, dir.name, '.system_generated', 'logs');
+                                const tpFull = path.join(logsDir, 'transcript_full.jsonl');
+                                const tp = fs.existsSync(tpFull) ? tpFull : path.join(logsDir, 'transcript.jsonl');
                                 if (!fs.existsSync(tp)) continue;
                                 try {
                                     const stats = fs.statSync(tp);
@@ -765,7 +775,7 @@ async function snapshotChatState(port, specificTargetId = null, threadName = nul
         if (!activeId) return;
         const appDataName = DriverFactory.getDriver().appDataName;
         const logsDir = path.join(os.homedir(), '.gemini', appDataName, 'brain', activeId, '.system_generated', 'logs');
-        const hasLogs = fs.existsSync(path.join(logsDir, 'overview.txt')) || fs.existsSync(path.join(logsDir, 'transcript.jsonl'));
+        const hasLogs = fs.existsSync(path.join(logsDir, 'overview.txt')) || fs.existsSync(path.join(logsDir, 'transcript_full.jsonl')) || fs.existsSync(path.join(logsDir, 'transcript.jsonl'));
         if (!hasLogs) return;
         
         // Persist the resolved thread ID so /latest can use it directly
@@ -877,9 +887,14 @@ async function _domLatestExtraction(port, specificTargetId = null) {
                     return "";
                 }
                 
-                // If no User tag found, the fallback might have just returned all text.
-                // We'll return the last 1500 chars to be safe, or just the whole thing
-                // if it's small, because we don't want to return a huge wall of text.
+                // If no User tag found (e.g. user message scrolled out of virtualized DOM), check for Agent tag
+                if (fullText.includes('🤖 Agent:')) {
+                    const agentOnlyParts = fullText.split('🤖 Agent:');
+                    const lastAgentOnly = agentOnlyParts[agentOnlyParts.length - 1].trim();
+                    if (lastAgentOnly) return lastAgentOnly;
+                }
+
+                // Fallback if no tags found at all
                 if (fullText.length > 3000) {
                     return fullText.substring(fullText.length - 3000);
                 }
@@ -1089,7 +1104,10 @@ async function getFullLatestResponse(port, specificTargetId = null, threadName =
             console.log(`[getFullLatestResponse] ✓ DOM extraction successful (${finalDomText.length} chars) | Target: ${targetIdToUse || 'auto'}`);
             
             // Side-effect: resolve conversation UUID from the DOM content so that
-            // /artifacts and other filesystem-dependent commands know which thread is active
+            // /artifacts and other filesystem-dependent commands know which thread is active.
+            // Also, if transcript_full.jsonl matches this exact response and is longer/richer,
+            // prefer its pure untruncated Markdown over DOM-reconstructed text.
+            let fullTranscriptText = null;
             try {
                 const snippet = domResult && domResult.length > 80 ? domResult.substring(20, 70).trim() : (domResult ? domResult.substring(0, 40).trim() : '');
                 if (snippet.length > 15) {
@@ -1099,19 +1117,45 @@ async function getFullLatestResponse(port, specificTargetId = null, threadName =
                         const dirs = fs.readdirSync(brainPath, { withFileTypes: true })
                             .filter(d => d.isDirectory());
                         for (const dir of dirs) {
-                            const tp = path.join(brainPath, dir.name, '.system_generated', 'logs', 'transcript.jsonl');
+                            const logsDir = path.join(brainPath, dir.name, '.system_generated', 'logs');
+                            const tpFull = path.join(logsDir, 'transcript_full.jsonl');
+                            const tp = fs.existsSync(tpFull) ? tpFull : path.join(logsDir, 'transcript.jsonl');
                             if (!fs.existsSync(tp)) continue;
                             try {
                                 const stats = fs.statSync(tp);
-                                const readSize = Math.min(50000, stats.size);
+                                const readSize = Math.min(100000, stats.size);
                                 const fd = fs.openSync(tp, 'r');
                                 const buffer = Buffer.alloc(readSize);
                                 fs.readSync(fd, buffer, 0, readSize, Math.max(0, stats.size - readSize));
                                 fs.closeSync(fd);
-                                if (buffer.toString('utf8').includes(snippet)) {
+                                const tailStr = buffer.toString('utf8');
+                                if (tailStr.includes(snippet)) {
                                     lastResolvedThreadId = dir.name;
                                     _notifyThreadResolved(dir.name);
                                     console.log(`[getFullLatestResponse] Resolved thread from DOM content → ${dir.name.substring(0, 8)}`);
+                                    if (tp === tpFull) {
+                                        const lines = tailStr.split('\n').filter(l => l.trim());
+                                        const modelMsgs = [];
+                                        for (let i = lines.length - 1; i >= 0; i--) {
+                                            try {
+                                                const entry = JSON.parse(lines[i]);
+                                                if (entry.source === 'USER_EXPLICIT' && entry.content) break;
+                                                if (entry.source === 'MODEL' && entry.type === 'PLANNER_RESPONSE' && entry.content && entry.content.trim()) {
+                                                    let c = entry.content.trim();
+                                                    if (!includeThoughts) {
+                                                        c = c.replace(/<thought>[\s\S]*?<\/thought>\n?/g, '').trim();
+                                                    }
+                                                    if (c) modelMsgs.unshift(c);
+                                                }
+                                            } catch (_) {}
+                                        }
+                                        if (modelMsgs.length > 0) {
+                                            const joined = modelMsgs.join('\n\n');
+                                            if (joined.includes(snippet) && joined.length >= (domResult ? domResult.length * 0.8 : 0)) {
+                                                fullTranscriptText = joined;
+                                            }
+                                        }
+                                    }
                                     break;
                                 }
                             } catch (_) {}
@@ -1120,7 +1164,8 @@ async function getFullLatestResponse(port, specificTargetId = null, threadName =
                 }
             } catch (_) {}
             
-            return { text: finalDomText, buttons: modalButtons };
+            const bestText = fullTranscriptText ? (fullTranscriptText + modalText) : finalDomText;
+            return { text: bestText, buttons: modalButtons };
         }
     } catch (e) {
         console.log(`[getFullLatestResponse] DOM extraction failed: ${e.message}`);
@@ -1140,12 +1185,14 @@ async function getFullLatestResponse(port, specificTargetId = null, threadName =
         if (activeId) {
             const appDataName = DriverFactory.getDriver().appDataName;
             const logsDir = path.join(os.homedir(), '.gemini', appDataName, 'brain', activeId, '.system_generated', 'logs');
-            const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+            const transcriptFullPath = path.join(logsDir, 'transcript_full.jsonl');
+            const transcriptCompactPath = path.join(logsDir, 'transcript.jsonl');
             const overviewPath = path.join(logsDir, 'overview.txt');
             
             for (let attempt = 1; attempt <= 5; attempt++) {
-                const logPath = fs.existsSync(transcriptPath) ? transcriptPath : (fs.existsSync(overviewPath) ? overviewPath : null);
-                const isTranscript = logPath === transcriptPath;
+                const transcriptPath = fs.existsSync(transcriptFullPath) ? transcriptFullPath : (fs.existsSync(transcriptCompactPath) ? transcriptCompactPath : null);
+                const logPath = transcriptPath || (fs.existsSync(overviewPath) ? overviewPath : null);
+                const isTranscript = !!transcriptPath && logPath === transcriptPath;
                 
                 if (logPath) {
                     const content = fs.readFileSync(logPath, 'utf8');
@@ -1170,7 +1217,7 @@ async function getFullLatestResponse(port, specificTargetId = null, threadName =
                     }
                     
                     if (modelMsgs.length > 0) {
-                        console.log(`[getFullLatestResponse] ✓ Filesystem fallback successful: thread ${activeId.substring(0, 8)} (Attempt ${attempt})`);
+                        console.log(`[getFullLatestResponse] ✓ Filesystem fallback successful: thread ${activeId.substring(0, 8)} (${path.basename(logPath)}, Attempt ${attempt})`);
                         return { text: modelMsgs.join('\n\n') + modalText, buttons: modalButtons };
                     }
                 }
@@ -2396,6 +2443,12 @@ async function getActiveThreadInfo(port, specificTargetId = null) {
                 if (wsName && wsName !== 'undefined' && wsName !== 'Launchpad') {
                     if (!workspaceName) workspaceName = wsName;
                 }
+                if (threadName) {
+                    threadName = threadName.replace(/\s+-\s+Antigravity$/i, '').trim();
+                    if (workspaceName && threadName.toLowerCase().endsWith(' - ' + workspaceName.toLowerCase())) {
+                        threadName = threadName.slice(0, -(' - ' + workspaceName).length).trim();
+                    }
+                }
                 
                 // Only break if we got a REAL thread name (not just workspace/title fallback)
                 // If threadId was found directly from DOM, that's authoritative — break immediately
@@ -2565,6 +2618,12 @@ async function getCurrentModel(port) {
                             const label = btn.getAttribute('aria-label') || '';
                             const current = label.match(/(?:current|当前)[：:]\\s*(.+)$/i);
                             if (current && current[1]) return current[1].trim();
+                            const spans = Array.from(btn.querySelectorAll('span')).map(s => (s.textContent || '').trim()).filter(Boolean);
+                            if (spans.length >= 2 && /^(low|medium|high)$/i.test(spans[spans.length - 1])) {
+                                const tier = spans[spans.length - 1];
+                                const formattedTier = tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase();
+                                return spans.slice(0, -1).join(' ') + ' (' + formattedTier + ')';
+                            }
                             const txt = btn.textContent.trim();
                             if (txt) return txt;
                         }
@@ -2942,10 +3001,20 @@ async function getAvailableModels(port) {
                         const btn = AG_UI.getModelSelectorButton();
                         if (btn) {
                             const rect = btn.getBoundingClientRect();
+                            const clientX = rect.left + rect.width / 2;
+                            const clientY = rect.top + rect.height / 2;
+                            const screenX = window.screenX + clientX;
+                            const screenY = window.screenY + clientY;
+                            btn.focus();
+                            btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true, view: window, screenX, screenY, clientX, clientY, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                            btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true, view: window, screenX, screenY, clientX, clientY, button: 0 }));
+                            btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, composed: true, view: window, screenX, screenY, clientX, clientY, button: 0, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                            btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, composed: true, view: window, screenX, screenY, clientX, clientY, button: 0 }));
+                            btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window, screenX, screenY, clientX, clientY, button: 0 }));
                             return {
                                 clicked: true,
-                                x: rect.left + rect.width / 2,
-                                y: rect.top + rect.height / 2
+                                x: clientX,
+                                y: clientY
                             };
                         }
                         return { clicked: false };
@@ -2953,11 +3022,8 @@ async function getAvailableModels(port) {
                 `, returnByValue: true
             });
 
-            if (openRes.result?.value?.x && Input) {
-                const { x, y } = openRes.result.value;
-                await Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-                await Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-                await new Promise(r => setTimeout(r, 400));
+            if (openRes.result?.value?.clicked) {
+                await new Promise(r => setTimeout(r, 350));
             }
 
             const res = await Runtime.evaluate({
@@ -2980,25 +3046,32 @@ async function getAvailableModels(port) {
                         // 1. Standalone 2.0 model panel
                         const panel = document.querySelector('[data-testid="model-selector-panel"]');
                         if (panel) {
-                            // Effort tier groups (Gemini 3.7 Flash, Gemini 3.6 Flash, etc.)
+                            // Effort tier groups (Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5, Claude Sonnet 5.5, etc.)
                             const effortGroups = Array.from(panel.querySelectorAll('[data-testid="model-selector-effort-group"]'));
                             for (const eg of effortGroups) {
-                                const baseName = eg.textContent.trim();
+                                const baseName = (eg.getAttribute('data-model-base') || eg.textContent || '').trim();
                                 if (!baseName || seen.has(baseName)) continue;
                                 seen.add(baseName);
+                                const rowEl = eg.closest('[role="menuitem"]') || eg.parentElement;
+                                const sibText = (eg.nextElementSibling?.textContent || '').trim();
+                                const rowText = ((rowEl ? rowEl.textContent : '') || '').replace(/New$/i, '').trim();
+                                const tierMatch = (/^(Low|Medium|High)$/i.test(sibText) ? [null, sibText] : null) || rowText.match(/(Low|Medium|High)$/i);
+                                const currentTier = tierMatch ? (tierMatch[1].charAt(0).toUpperCase() + tierMatch[1].slice(1).toLowerCase()) : 'Medium';
                                 models.push({
                                     name: baseName,
                                     baseName: baseName,
                                     hasTiers: true,
                                     tiers: baseName.includes('3.1 Pro') ? ['Low', 'High'] : ['Low', 'Medium', 'High'],
-                                    currentTier: 'Medium'
+                                    currentTier: currentTier
                                 });
                             }
                             
-                            // Direct items (Claude Sonnet, Claude Opus, GPT-OSS, etc.)
+                            // Direct items (GPT-OSS, etc.)
                             const directItems = Array.from(panel.querySelectorAll('[data-testid="model-selector-item"]'));
                             for (const di of directItems) {
-                                const name = di.textContent.trim();
+                                const labelAttr = (di.getAttribute('data-model-label') || '').trim();
+                                const rawText = (di.textContent || '').replace(/Notice$/i, '').replace(/New$/i, '').trim();
+                                const name = labelAttr || rawText;
                                 if (name && !seen.has(name)) {
                                     seen.add(name);
                                     models.push({
@@ -3022,7 +3095,8 @@ async function getAvailableModels(port) {
                                 const name = labelAttr || baseAttr || cleanModelText(item.textContent.trim().split(/\\r?\\n/)[0]);
                                 if (name && !seen.has(name)) {
                                     seen.add(name);
-                                    const hasTiers = (name.includes('Gemini') || name.includes('Flash') || name.includes('Pro')) && !name.includes('Thinking');
+                                    const isSubmenuGroup = !!baseAttr || item.getAttribute('aria-haspopup') === 'menu' || !!item.querySelector('[data-testid="model-selector-effort-group"]');
+                                    const hasTiers = isSubmenuGroup || ((name.includes('Gemini') || name.includes('Flash') || name.includes('Pro') || name.includes('Claude')) && !name.includes('Thinking') && !name.includes('GPT-OSS'));
                                     models.push({
                                         name: name,
                                         baseName: name,
@@ -3073,14 +3147,14 @@ async function selectModel(port, modelName, specificTargetId = null) {
                 (async () => {
                     const rawTarget = ${JSON.stringify(modelName)};
                     
-                    // Parse target: Effort tiers ONLY apply to Gemini models
+                    // Parse target: Effort tiers apply to Gemini and Claude models (skip GPT-OSS which has "(Medium)" in its base label)
                     let targetEffort = null;
                     let targetBase = rawTarget;
-                    if (/gemini/i.test(rawTarget)) {
-                        const effortMatch = rawTarget.match(/\\((Low|Medium|High)\\)$/i) || rawTarget.match(/\\b(low|medium|high)\\b$/i);
+                    if (!/gpt-oss/i.test(rawTarget)) {
+                        const effortMatch = rawTarget.match(/\\((Low|Medium|High)\\)$/i) || rawTarget.match(/(low|medium|high)$/i);
                         if (effortMatch) {
                             targetEffort = effortMatch[1].toLowerCase();
-                            targetBase = rawTarget.replace(/\\s*\\(?\\b(low|medium|high)\\b\\)?\\s*$/i, '').trim();
+                            targetBase = rawTarget.replace(/\\s*\\(?\\s*(low|medium|high)\\s*\\)?\\s*$/i, '').trim();
                         }
                     }
 
@@ -3115,6 +3189,7 @@ async function selectModel(port, modelName, specificTargetId = null) {
                         el.focus();
                         el.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, composed: true, view: window, clientX, clientY, screenX, screenY, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
                         el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, composed: true, view: window, clientX, clientY, screenX, screenY, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                        el.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, cancelable: true, composed: true, view: window, clientX, clientY, screenX, screenY, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
                         el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true, clientX, clientY, screenX, screenY }));
                         el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, clientX, clientY, screenX, screenY }));
                         el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX, clientY, screenX, screenY }));
@@ -3144,12 +3219,12 @@ async function selectModel(port, modelName, specificTargetId = null) {
 
                     // Find matching base item
                     let matchedItem = candidateList.find(el => {
-                        const baseAttr = el.querySelector('[data-model-base]')?.getAttribute('data-model-base');
-                        if (baseAttr && stripPunct(baseAttr) === targetBaseNorm) return true;
+                        const baseAttr = el.querySelector('[data-model-base]')?.getAttribute('data-model-base') || el.getAttribute('data-model-base');
+                        if (baseAttr && (stripPunct(baseAttr) === targetBaseNorm || stripPunct(baseAttr).includes(targetBaseNorm) || targetBaseNorm.includes(stripPunct(baseAttr)))) return true;
                         const labelAttr = el.getAttribute('data-model-label');
-                        if (labelAttr && stripPunct(labelAttr) === targetBaseNorm) return true;
+                        if (labelAttr && (stripPunct(labelAttr) === targetBaseNorm || stripPunct(labelAttr).includes(targetBaseNorm))) return true;
                         
-                        const innerSpan = el.querySelector('span.truncate span, span span') || el;
+                        const innerSpan = el.querySelector('span.truncate span, span[data-model-base], span span') || el;
                         const innerNorm = stripPunct(innerSpan.textContent);
                         const fullNorm = stripPunct(el.textContent);
 
@@ -3163,20 +3238,28 @@ async function selectModel(port, modelName, specificTargetId = null) {
                         return { selected: false, reason: "base_model_not_found", targetBase, available: candidateList.map(i => i.textContent.trim()) };
                     }
 
-                    // Only Gemini models with explicit targetEffort need submenu handling
-                    if (targetEffort) {
+                    // Normalize matchedItem to the outer [role="menuitem"] row if it matched an inner span
+                    if (matchedItem.getAttribute('role') !== 'menuitem' && matchedItem.closest('[role="menuitem"]')) {
+                        matchedItem = matchedItem.closest('[role="menuitem"]');
+                    }
+
+                    const isSubmenuItem = matchedItem.getAttribute('aria-haspopup') === 'menu' || !!matchedItem.querySelector('[data-testid="model-selector-effort-group"]');
+                    const effectiveEffort = targetEffort || (isSubmenuItem ? 'high' : null);
+
+                    // Models with effort submenu (Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5, Claude Sonnet 5.5, etc.)
+                    if (effectiveEffort) {
                         // Check if direct effort button exists inside item
                         const directEffortBtn = Array.from(matchedItem.querySelectorAll('button, [role="button"], [role="menuitem"], [role="radio"], div[class*="cursor-pointer"], span[class*="cursor-pointer"]'))
                             .find(el => {
                                 const t = (el.textContent || '').trim().toLowerCase();
                                 const attr = (el.getAttribute('data-effort') || el.getAttribute('data-tier') || '').trim().toLowerCase();
-                                return t === targetEffort || t.includes(targetEffort) || attr === targetEffort;
+                                return t === effectiveEffort || t.includes(effectiveEffort) || attr === effectiveEffort;
                             });
 
                         if (directEffortBtn) {
                             dispatchClick(directEffortBtn);
                             await new Promise(r => setTimeout(r, 150));
-                            return { selected: true, method: "direct_effort_child", base: targetBase, effort: targetEffort };
+                            return { selected: true, method: "direct_effort_child", base: targetBase, effort: effectiveEffort };
                         }
 
                         // Open submenu by hovering
@@ -3192,7 +3275,7 @@ async function selectModel(port, modelName, specificTargetId = null) {
                                 .filter(el => el.offsetWidth > 0 && el.offsetHeight > 0 && el !== mainParent && (!mainId || el.id !== mainId));
                             if (subMenus.length > 0) {
                                 for (const sm of subMenus) {
-                                    const items = Array.from(sm.querySelectorAll('[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-radix-collection-item], div[data-base-ui-focusable], div[class*="cursor-pointer"], button'))
+                                    const items = Array.from(sm.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="menuitemcheckbox"], [data-radix-collection-item], div[data-base-ui-focusable], div[class*="cursor-pointer"], button'))
                                         .filter(el => el.offsetWidth > 0 && (el.textContent || '').trim().length > 0 && !candidateList.includes(el));
                                     if (items.length > 0) {
                                         subOptions.push(...items);
@@ -3207,21 +3290,21 @@ async function selectModel(port, modelName, specificTargetId = null) {
                                 const optText = (opt.textContent || '').trim().toLowerCase();
                                 const effortAttr = (opt.getAttribute('data-effort') || opt.getAttribute('data-tier') || '').trim().toLowerCase();
                                 const ariaLabel = (opt.getAttribute('aria-label') || '').trim().toLowerCase();
-                                return optText === targetEffort || 
-                                       optText.startsWith(targetEffort) || 
-                                       effortAttr === targetEffort || 
-                                       ariaLabel.startsWith(targetEffort);
-                            });
+                                return optText === effectiveEffort || 
+                                       optText.startsWith(effectiveEffort) || 
+                                       effortAttr === effectiveEffort || 
+                                       ariaLabel.startsWith(effectiveEffort);
+                            }) || subOptions[subOptions.length - 1];
 
                             if (effortOption) {
                                 dispatchClick(effortOption);
                                 await new Promise(r => setTimeout(r, 150));
-                                return { selected: true, method: "effort_submenu", base: targetBase, effort: targetEffort };
+                                return { selected: true, method: "effort_submenu", base: targetBase, effort: effectiveEffort };
                             }
                         }
                     }
 
-                    // Direct model click (Claude, GPT, or base Gemini)
+                    // Direct model click (GPT-OSS or non-tiered model)
                     dispatchClick(matchedItem);
                     await new Promise(r => setTimeout(r, 150));
                     return { selected: true, method: "direct_click", model: matchedItem.textContent.trim() };

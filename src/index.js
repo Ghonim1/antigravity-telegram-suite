@@ -502,7 +502,9 @@ migrateEnvFromExample();
 
 function markdownToTelegramHtml(text) {
     if (!text) return '';
-    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Strip any accidental compact transcript truncation markers
+    let html = text.replace(/<truncated \d+ bytes>/gi, '');
+    html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     
     // Protect multiline code blocks using safe Unicode Private Use Area tokens
     const codeBlocks = [];
@@ -524,15 +526,44 @@ function markdownToTelegramHtml(text) {
         return id;
     });
 
+    // Convert links BEFORE bold/italic so underscores/asterisks inside URLs are never corrupted
+    const links = [];
+    html = html.replace(/\[([^\]]+)\]\(file:\/\/\/[^)\n]+\)/gi, '<b>$1</b>');
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\n]+)\)/g, (match, label, url) => {
+        const id = '\uE000LK' + links.length + '\uE001';
+        links.push({ label, url });
+        return id;
+    });
+
+    // Convert horizontal rules before bold/italic
+    html = html.replace(/^\s*(?:---+|\*\*\*+|___+)\s*$/gm, '───────────────');
+
+    // Convert unordered list bullets (* or -) at start of lines so '*' is never paired as italic across lines
+    html = html.replace(/^(\s*)[\*\-]\s+/gm, '$1• ');
+
+    // Convert GitHub-style blockquote alerts and blockquotes
+    html = html.replace(/^&gt;\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/gim, (m, kind) => {
+        const icons = { NOTE: 'ℹ️', TIP: '💡', IMPORTANT: '❗', WARNING: '⚠️', CAUTION: '🚨' };
+        const k = kind.toUpperCase();
+        return `${icons[k] || 'ℹ️'} <b>${k}</b>`;
+    });
+    html = html.replace(/^&gt;\s?(.*)$/gm, '▎ $1');
+
+    // Headings and strictly single-line bold/italic (never match across \n)
     html = html.replace(/^(#{1,6})\s+(.+)$/gm, '<b>$2</b>');
-    html = html.replace(/\*\*([^\*]+)\*\*/g, '<b>$1</b>');
-    html = html.replace(/(?<![A-Za-z0-9])\*([^\*]+)\*(?![A-Za-z0-9])/g, '<i>$1</i>');
-    html = html.replace(/(?<![A-Za-z0-9])_([^_]+)_(?![A-Za-z0-9])/g, '<i>$1</i>');
-    html = html.replace(/\[([^\]]+)\]\(file:\/\/\/[^)]+\)/gi, '<b>$1</b>');
-    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2">$1</a>');
+    html = html.replace(/\*\*([^\*\n]+?)\*\*/g, '<b>$1</b>');
+    html = html.replace(/__([^_\n]+?)__/g, '<b>$1</b>');
+    html = html.replace(/(?<![A-Za-z0-9\*])\*([^\s\*\n](?:[^\*\n]*?[^\s\*\n])?)\*(?![A-Za-z0-9\*])/g, '<i>$1</i>');
+    html = html.replace(/(?<![A-Za-z0-9_])_([^\s_\n](?:[^_\n]*?[^\s_\n])?)_(?![A-Za-z0-9_])/g, '<i>$1</i>');
+
     html = html.replace(/\[x\]/ig, '✅');
     html = html.replace(/\[ \]/g, '⬜');
     html = html.replace(/\[\/\]/g, '🔄');
+
+    // Restore protected links
+    links.forEach((lnk, idx) => {
+        html = html.replace('\uE000LK' + idx + '\uE001', () => `<a href="${lnk.url}">${lnk.label}</a>`);
+    });
 
     // Restore protected code
     inlineCodes.forEach((code, idx) => {
@@ -543,6 +574,71 @@ function markdownToTelegramHtml(text) {
     });
 
     return html;
+}
+
+function splitTelegramHtmlChunks(htmlText, maxLen = 3500) {
+    const rawLines = (htmlText || '').split('\n');
+    const lines = [];
+    for (const rawLine of rawLines) {
+        if (rawLine.length <= maxLen) {
+            lines.push(rawLine);
+        } else {
+            // Split an overlong single line without dropping any content
+            let rem = rawLine;
+            while (rem.length > maxLen) {
+                let splitIdx = rem.lastIndexOf(' ', maxLen);
+                if (splitIdx < maxLen * 0.5) splitIdx = maxLen;
+                // Avoid splitting inside an HTML tag <...> or entity &...;
+                const lastOpenTag = rem.lastIndexOf('<', splitIdx);
+                const lastCloseTag = rem.lastIndexOf('>', splitIdx);
+                if (lastOpenTag > lastCloseTag) {
+                    splitIdx = lastOpenTag;
+                }
+                lines.push(rem.substring(0, splitIdx));
+                rem = rem.substring(splitIdx).trimStart();
+            }
+            if (rem.length > 0) lines.push(rem);
+        }
+    }
+
+    const chunks = [];
+    let currentChunk = '';
+    let inPre = false;
+    let preLang = '';
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Check chunk overflow BEFORE updating inPre for the new line
+        if (currentChunk.length + line.length + 1 > maxLen && currentChunk.trim().length > 0) {
+            if (inPre) {
+                currentChunk += preLang ? '</code></pre>' : '</pre>';
+            }
+            chunks.push(currentChunk);
+            currentChunk = inPre ? (preLang ? `<pre><code class="language-${preLang}">\n` : '<pre>\n') : '';
+        }
+
+        const preMatch = line.match(/<pre>(?:<code class="language-([^"]+)">)?/);
+        if (preMatch) {
+            inPre = true;
+            preLang = preMatch[1] || '';
+        }
+        if (line.includes('</pre>')) {
+            inPre = false;
+            preLang = '';
+        }
+
+        currentChunk += line + '\n';
+    }
+
+    if (currentChunk.trim().length > 0) {
+        if (inPre) {
+            currentChunk += preLang ? '</code></pre>' : '</pre>';
+        }
+        chunks.push(currentChunk);
+    }
+
+    return chunks;
 }
 
 function downloadLocalImageUrl(rawUrl) {
@@ -693,7 +789,7 @@ async function sendLongMessage(ctx, text, prefix = '', buttons = null, replyToMs
                     await new Promise(r => setTimeout(r, 2000 * attempt));
                 } else if (err.message.includes("can't parse entities") && !isPlain) {
                     // Fallback to sending raw text if HTML parsing completely fails
-                    const plain = content.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                    const plain = content.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
                     return await replyWithRetry(plain.substring(0, 4000), true, kbOpts, 1, threadReplyId);
                 } else {
                     throw err;
@@ -703,46 +799,17 @@ async function sendLongMessage(ctx, text, prefix = '', buttons = null, replyToMs
     }
 
     try {
-        const lines = htmlText.split('\n');
-        let currentChunk = '';
-        let inPre = false;
-        let preLang = '';
+        const chunks = splitTelegramHtmlChunks(htmlText, MAX_LEN);
         let currentReplyId = replyToMsgId;
         const sentMsgIds = [];
 
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
-            
-            // If a single line is absurdly long, force a split
-            if (line.length > MAX_LEN) {
-               line = line.substring(0, MAX_LEN) + '...';
+        for (let i = 0; i < chunks.length; i++) {
+            const isLast = i === chunks.length - 1;
+            const sentMsg = await replyWithRetry(chunks[i], false, isLast ? finalButtons : null, 3, currentReplyId);
+            if (sentMsg) {
+                currentReplyId = sentMsg.message_id;
+                sentMsgIds.push(sentMsg.message_id);
             }
-
-            const preMatch = line.match(/<pre>(?:<code class="language-([^"]+)">)?/);
-            if (preMatch) {
-                inPre = true;
-                preLang = preMatch[1] || '';
-            }
-            if (line.includes('</pre>')) {
-                inPre = false;
-            }
-            
-            if (currentChunk.length + line.length > MAX_LEN) {
-                if (inPre) {
-                    currentChunk += preLang ? '</code></pre>' : '</pre>';
-                }
-                const sentMsg = await replyWithRetry(currentChunk, false, null, 3, currentReplyId);
-                if (sentMsg) {
-                    currentReplyId = sentMsg.message_id;
-                    sentMsgIds.push(sentMsg.message_id);
-                }
-                currentChunk = inPre ? (preLang ? `<pre><code class="language-${preLang}">\n` : '<pre>\n') : '';
-            }
-            currentChunk += line + '\n';
-        }
-        if (currentChunk.trim().length > 0) {
-            const sentMsg = await replyWithRetry(currentChunk, false, finalButtons, 3, currentReplyId);
-            if (sentMsg) sentMsgIds.push(sentMsg.message_id);
         }
         if (sentMsgIds && sentMsgIds.length > 0) {
             const lastMsgId = sentMsgIds[sentMsgIds.length - 1];
@@ -752,7 +819,7 @@ async function sendLongMessage(ctx, text, prefix = '', buttons = null, replyToMs
                 baseKeyboard: buttons
             });
         }
-        console.log(`sendLongMessage: Sent successfully`);
+        console.log(`sendLongMessage: Sent successfully (${chunks.length} chunk(s))`);
         return sentMsgIds;
     } catch (err) {
         console.error('sendLongMessage final error:', err.message);
@@ -3022,12 +3089,10 @@ async function ensureModelsCache() {
         }
         if (!cachedModelsList || cachedModelsList.length === 0) {
             cachedModelsList = [
-                { name: 'Gemini 3.7 Flash', baseName: 'Gemini 3.7 Flash', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'Medium' },
-                { name: 'Gemini 3.6 Flash', baseName: 'Gemini 3.6 Flash', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'Medium' },
-                { name: 'Gemini 3.5 Flash', baseName: 'Gemini 3.5 Flash', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'Medium' },
-                { name: 'Gemini 3.1 Pro', baseName: 'Gemini 3.1 Pro', hasTiers: true, tiers: ['Low', 'High'], currentTier: 'Low' },
-                { name: 'Claude Sonnet 4.6 (Thinking)', baseName: 'Claude Sonnet 4.6 (Thinking)', hasTiers: false, tiers: [] },
-                { name: 'Claude Opus 4.6 (Thinking)', baseName: 'Claude Opus 4.6 (Thinking)', hasTiers: false, tiers: [] },
+                { name: 'Gemini 4 Argon', baseName: 'Gemini 4 Argon', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'High' },
+                { name: 'Gemini 3.8 Flash', baseName: 'Gemini 3.8 Flash', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'Medium' },
+                { name: 'Claude Opus 5.5', baseName: 'Claude Opus 5.5', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'High' },
+                { name: 'Claude Sonnet 5.5', baseName: 'Claude Sonnet 5.5', hasTiers: true, tiers: ['Low', 'Medium', 'High'], currentTier: 'Medium' },
                 { name: 'GPT-OSS 120B (Medium)', baseName: 'GPT-OSS 120B (Medium)', hasTiers: false, tiers: [] }
             ];
         }
@@ -5102,10 +5167,9 @@ async function init() {
             console.log(`[TaskWatcher] 📬 Proactive notification (${type}, conv: ${conversationId?.substring(0, 8)}, ${text.length} chars)`);
 
             const header = '🔔 <b>' + t('task_watcher.proactive_msg') + '</b>\n\n';
-            // Truncate for Telegram 4096 char limit
-            const maxLen = 4096 - header.length - 10;
-            const body = text.length > maxLen ? text.substring(0, maxLen) + '…' : text;
-            const fullMsg = header + body;
+            const fullHtml = header + markdownToTelegramHtml(text);
+            const chunks = splitTelegramHtmlChunks(fullHtml, 3500);
+            if (chunks.length === 0) return;
             const isFeedback = type === 'agent_proactive_feedback';
 
             for (const chatId of ALLOWED_CHAT_IDS) {
@@ -5113,13 +5177,11 @@ async function init() {
                     const existing = proactiveMessageIds.get(chatId);
                     const now = Date.now();
 
-                    // If we have a recent message, try to edit it
+                    // If we have a recent message and the notification fits in a single chunk, try to edit it
                     // BUT: never overwrite a feedback message (with Proceed/Cancel) with a plain notification
-                    if (existing && (now - existing.timestamp) < PROACTIVE_RESET_MS) {
-                        // If existing has feedback buttons and new is plain, skip edit — send new
+                    if (chunks.length === 1 && existing && (now - existing.timestamp) < PROACTIVE_RESET_MS) {
                         if (existing.hasFeedback && !isFeedback) {
                             console.log(`[TaskWatcher] Existing msg ${existing.messageId} has Proceed/Cancel buttons — sending new msg instead of overwriting`);
-                            // Fall through to send new message
                         } else {
                             try {
                                 const opts = { parse_mode: 'HTML' };
@@ -5135,14 +5197,13 @@ async function init() {
                                 }
                                 await bot.telegram.editMessageText(
                                     chatId, existing.messageId, null,
-                                    fullMsg, opts
+                                    chunks[0], opts
                                 );
                                 existing.timestamp = now;
                                 existing.hasFeedback = isFeedback;
                                 console.log(`[TaskWatcher] Edited existing notification msg ${existing.messageId}`);
                                 continue;
                             } catch (editErr) {
-                                // Edit failed (message too old, deleted, or content unchanged)
                                 console.log(`[TaskWatcher] Edit failed, sending new: ${editErr.message}`);
                             }
                         }
@@ -5160,24 +5221,30 @@ async function init() {
                         };
                     }
 
-                    // Send a new message
-                    try {
-                        const opts = { parse_mode: 'HTML' };
-                        if (replyMarkup) opts.reply_markup = replyMarkup;
-                        const sent = await bot.telegram.sendMessage(chatId, fullMsg, opts);
-                        proactiveMessageIds.set(chatId, { messageId: sent.message_id, timestamp: now, hasFeedback: isFeedback });
-                        console.log(`[TaskWatcher] Sent new notification msg ${sent.message_id}`);
-                    } catch (err) {
-                        if (err.message.includes("parse entities")) {
-                            const plain = fullMsg.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                            const opts = {};
-                            if (replyMarkup) opts.reply_markup = replyMarkup;
-                            const sent = await bot.telegram.sendMessage(chatId, plain, opts);
-                            proactiveMessageIds.set(chatId, { messageId: sent.message_id, timestamp: now, hasFeedback: isFeedback });
-                            console.log(`[TaskWatcher] Sent plain text fallback ${sent.message_id}`);
-                        } else {
-                            throw err;
+                    // Send all chunks sequentially
+                    let lastSent = null;
+                    for (let i = 0; i < chunks.length; i++) {
+                        const isLast = i === chunks.length - 1;
+                        const chunkContent = chunks[i];
+                        try {
+                            const opts = { parse_mode: 'HTML' };
+                            if (isLast && replyMarkup) opts.reply_markup = replyMarkup;
+                            lastSent = await bot.telegram.sendMessage(chatId, chunkContent, opts);
+                        } catch (err) {
+                            if (err.message.includes("parse entities")) {
+                                const plain = chunkContent.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"');
+                                const opts = {};
+                                if (isLast && replyMarkup) opts.reply_markup = replyMarkup;
+                                lastSent = await bot.telegram.sendMessage(chatId, plain, opts);
+                                console.log(`[TaskWatcher] Sent plain text fallback ${lastSent.message_id}`);
+                            } else {
+                                throw err;
+                            }
                         }
+                    }
+                    if (lastSent) {
+                        proactiveMessageIds.set(chatId, { messageId: lastSent.message_id, timestamp: now, hasFeedback: isFeedback });
+                        console.log(`[TaskWatcher] Sent notification (${chunks.length} chunk(s)), last msg ${lastSent.message_id}`);
                     }
                 } catch (e) {
                     console.error('[TaskWatcher] Failed to send notification:', e.message);

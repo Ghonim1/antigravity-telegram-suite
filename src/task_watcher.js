@@ -49,14 +49,14 @@ class TaskWatcher {
         this.activeConversationId = conversationId;
         if (!conversationId) return;
 
-        const transcriptPath = path.join(
-            this.brainPath, conversationId,
-            '.system_generated', 'logs', 'transcript.jsonl'
-        );
+        const logsDir = path.join(this.brainPath, conversationId, '.system_generated', 'logs');
+        const fullTranscriptPath = path.join(logsDir, 'transcript_full.jsonl');
+        const compactTranscriptPath = path.join(logsDir, 'transcript.jsonl');
+        const transcriptPath = fs.existsSync(fullTranscriptPath) ? fullTranscriptPath : compactTranscriptPath;
 
         if (!fs.existsSync(transcriptPath)) {
             console.log(`[TaskWatcher] Transcript not found for ${conversationId.substring(0, 8)}, searching for most recent...`);
-            // Fallback: find the most recently modified transcript.jsonl in brain/
+            // Fallback: find the most recently modified transcript in brain/
             const fallbackId = this._findMostRecentConversation();
             if (fallbackId && fallbackId !== conversationId) {
                 console.log(`[TaskWatcher] Falling back to most recent conversation: ${fallbackId.substring(0, 8)}`);
@@ -292,10 +292,9 @@ class TaskWatcher {
                 // Skip non-UUID directories
                 if (entry.name.length < 30) continue;
 
-                const tPath = path.join(
-                    this.brainPath, entry.name,
-                    '.system_generated', 'logs', 'transcript.jsonl'
-                );
+                const logsDir = path.join(this.brainPath, entry.name, '.system_generated', 'logs');
+                const fullPath = path.join(logsDir, 'transcript_full.jsonl');
+                const tPath = fs.existsSync(fullPath) ? fullPath : path.join(logsDir, 'transcript.jsonl');
 
                 try {
                     const stats = fs.statSync(tPath);
